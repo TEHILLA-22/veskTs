@@ -134,6 +134,16 @@ function makeNode(type, tag) {
   node.getAttribute = (k) => (node._attrs.has(k) ? node._attrs.get(k) : null);
   node.setAttribute = (k, v) => { node._attrs.set(k, String(v)); };
   node.hasAttribute = (k) => node._attrs.has(k);
+  def('style', () => {
+    const raw = node._attrs.get('style') || '';
+    const style = {};
+    for (const part of raw.split(';')) {
+      const i = part.indexOf(':');
+      if (i === -1) continue;
+      style[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+    }
+    return style;
+  });
   node.querySelectorAll = () => [];
   node.addEventListener = () => {};
   node.removeEventListener = () => {};
@@ -346,6 +356,116 @@ describe('createHydrateWalker', () => {
     // SSR emits `<!--vsk--><a>` for Link roots; the claim must adopt it in place.
     const aClaim = sub.nextElement('a');
     expect(aClaim).toBe(a);
+    cleanupDocument();
+  });
+
+  it('claims a plain JS component root inside an empty boundary subWalker (lucide SSR shape)', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const mBox = document.createComment('vsk');
+    const box = document.createElement('span');
+    box.setAttribute('style', 'display:contents');
+    const svg = document.createElement('header');
+    svg.setAttribute('class', 'lucide lucide-menu');
+    box.appendChild(svg);
+    root.appendChild(mBox);
+    root.appendChild(box);
+
+    const walker = createHydrateWalker(root);
+    const boxClaim = walker.nextElement();
+    expect(boxClaim).toBe(box);
+    const sub = walker.subWalker(box);
+    // Plain JS components emit NO interior `<!--vsk-->` marker; the sub-walker
+    // must still claim the SSR root in place (positional fallback) rather than
+    // fresh-creating a duplicate that orphans the SSR node inside the wrapper.
+    const svgClaim = sub.nextElement('header');
+    expect(svgClaim).toBe(svg);
+    expect(svg.hasAttribute('data-vsk-claimed')).toBe(true);
+    expect(box.contains(svgClaim)).toBe(true);
+    cleanupDocument();
+  });
+
+  it('claims a second plain JS child from the same empty boundary subWalker', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const mBox = document.createComment('vsk');
+    const box = document.createElement('span');
+    box.setAttribute('style', 'display:contents');
+    const a = document.createElement('div');
+    const b = document.createElement('div');
+    box.appendChild(a);
+    box.appendChild(b);
+    root.appendChild(mBox);
+    root.appendChild(box);
+
+    const walker = createHydrateWalker(root);
+    walker.nextElement();
+    const sub = walker.subWalker(box);
+    const aClaim = sub.nextElement('div');
+    const bClaim = sub.nextElement('div');
+    expect(aClaim).toBe(a);
+    expect(bClaim).toBe(b);
+    cleanupDocument();
+  });
+
+  it('fresh-creates when an empty boundary subWalker has nothing to claim', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const mBox = document.createComment('vsk');
+    const box = document.createElement('span');
+    box.setAttribute('style', 'display:contents');
+    root.appendChild(mBox);
+    root.appendChild(box);
+
+    const walker = createHydrateWalker(root);
+    walker.nextElement();
+    const sub = walker.subWalker(box);
+    const el = sub.nextElement('section');
+    expect(el.tagName).toBe('SECTION');
+    expect(el.parentNode).toBe(null);
+    cleanupDocument();
+  });
+
+  it('exhausted walker builds fresh nodes silently on post-hydration re-renders (no warn spam)', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const m1 = document.createComment('vsk');
+    const s1 = document.createElement('div');
+    s1.setAttribute('data-vsk-claimed', '');
+    root.appendChild(m1); root.appendChild(s1);
+
+    const walker = createHydrateWalker(root, [m1]);
+    // First claim consumes the only marker.
+    const first = walker.nextElement('div');
+    expect(first).toBe(s1);
+    // SSR rendered the loop empty (shown=0) so there is nothing else to claim.
+    const warns = captureWarns(() => {
+      // Reactive re-render of the loop after hydration: exhausted walker must
+      // fall back to fresh nodes silently, not warn on every interval tick.
+      const a = walker.nextElement('div');
+      const b = walker.nextElement('div');
+      expect(a.tagName).toBe('DIV');
+      expect(b.tagName).toBe('DIV');
+    });
+    expect(warns.length).toBe(0);
+    cleanupDocument();
+  });
+
+  it('unconsumed-marker mismatch still warns in dev', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const m1 = document.createComment('vsk');
+    const s1 = document.createElement('div');
+    root.appendChild(m1); root.appendChild(s1);
+
+    const walker = createHydrateWalker(root);
+    const warns = captureWarns(() => {
+      // Claim wants a tag SSR never rendered while a marker still sits ahead.
+      const el = walker.nextElement('span');
+      expect(el.tagName).toBe('SPAN');
+    });
+    expect(warns.length).toBe(1);
+    expect(warns[0]).toContain('claim missed');
     cleanupDocument();
   });
 });

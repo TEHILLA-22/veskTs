@@ -258,16 +258,24 @@ class WalkerEngine implements HydrateWalker {
 			tm.state = 'claimed';
 			return adopted;
 		}
-		// Every marker the walker knew about is consumed, yet the render asked
-		// for more elements than SSR provided — or the SSR element tag did not
-		// match. Best effort: build a fresh element and warn in dev. (Warn only
-		// when SSR markers actually existed; SPA/client-only renders use empty
-		// marker lists on temp roots and legitimately build everything fresh.)
-		if (__hydrateDevMode && this.root && this.markers.length > 0) {
+		// Every claim parked itself — either because the render asked for more
+		// elements than SSR provided, or because the SSR element tag did not
+		// match the claim. Best effort: build a fresh element and warn in dev.
+		//
+		// The warning is scoped to walks that still hold unconsumed markers
+		// (`this.idx < this.markers.length`): that is the signature of a real
+		// SSR/client structural divergence — a marker is ahead of the cursor but
+		// the claim could not adopt it (wrong tag). Once the walker is exhausted
+		// every further `nextElement` is a post-hydration re-render (reactive
+		// loop/if blocks re-running after the interval or an event) legitimately
+		// building fresh nodes — silent, so a typing `for` loop does not spam the
+		// console every tick. SPA/client-only renders keep empty marker lists on
+		// temp roots and never warn.
+		if (__hydrateDevMode && this.root && this.idx < this.markers.length) {
 			devWarn(
 				`hydration claim missed <${tag || 'element'}> (${
-					this.markers.length
-				} markers consumed); the client rendered more or different content than SSR.` +
+					this.markers.length - this.idx
+				} markers unconsumed); the client rendered more or different content than SSR.` +
 					(this.root.outerHTML ? ` Fragment:\n${String(this.root.outerHTML).slice(0, 800)}` : '')
 			);
 		}
@@ -284,6 +292,18 @@ class WalkerEngine implements HydrateWalker {
 			});
 			this.idx += subMarkers.length;
 		for (const m of subMarkers) m.state = 'claimed';
+		// A component's SSR content always carries interior `<!--vsk-->` markers
+		// that the child's own hydrator claims. Exception: plain JS components
+		// (lucide icons etc.) render inside the compiler's boundary wrapper
+		// (`<!--vsk--><span style="display:contents">`) with NO interior markers.
+		// An empty marker list would send the child to `nextElement`'s fresh-node
+		// fallback, orphaning the SSR root inside the claimed wrapper (duplicate
+		// icons, non-reactive if/else blocks after hydration). Fall back to
+		// positional claiming of the wrapper's element children so those
+		// components adopt their SSR root in place, exactly like `.vsk` roots do.
+		if (subMarkers.length === 0 && rootEl && rootEl.tagName === 'SPAN' && rootEl.style && rootEl.style.display === 'contents') {
+			return createHydrateChildWalker(rootEl);
+		}
 		return new WalkerEngine(rootEl, subMarkers.map((m) => m.comment));
 	}
 
