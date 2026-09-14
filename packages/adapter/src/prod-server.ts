@@ -1,15 +1,14 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { resolve, extname, dirname } from 'node:path';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { createRateLimiter, resolveComponentName, safeJsonForScript, getClientProtocol, DEFAULT_MAX_BODY_BYTES } from '@vesk/compiler/src/server-codegen';
 import { securityHeaders } from '@vesk/compiler/src/server-utils';
 import { resolveWithin, installMdReadHook } from '@vesk/adapter/src/paths';
 import { resolveCssUrls, hasBuiltGlobalCss } from '@vesk/adapter/src/css';
+import { loadVeskConfig } from '@vesk/adapter/src/load-config';
 import type { SecurityConfig } from '@vesk/adapter/src/types';
 
-const _require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 async function readBody(req: AsyncIterable<Uint8Array>, maxBytes: number = DEFAULT_MAX_BODY_BYTES): Promise<Buffer> {
@@ -173,21 +172,11 @@ export async function startProdServer(outDir: string, options?: { port?: number;
   let securityConfig: SecurityConfig = {};
   let mdConfig: Record<string, unknown> | undefined;
   try {
-    const veskConfigPath = resolve(projectDir, 'vesk.config.js');
-    const veskConfigTsPath = resolve(projectDir, 'vesk.config.ts');
-    let rawConfig: unknown = {};
-    if (existsSync(veskConfigPath)) {
-      rawConfig = _require(veskConfigPath);
-    } else if (existsSync(veskConfigTsPath)) {
-      const { transpile } = _require('typescript') as { transpile: (src: string, opts: Record<string, number>) => string };
-      const src = readFileSync(veskConfigTsPath, 'utf-8');
-      const result = transpile(src, { module: 99, target: 99 });
-      rawConfig = eval(`(${result})`);
+    const config = await loadVeskConfig(projectDir);
+    if (config) {
+      securityConfig = { security: config.security as SecurityConfig['security'] };
+      mdConfig = config.md as Record<string, unknown> | undefined;
     }
-    if (typeof rawConfig === 'function') rawConfig = rawConfig();
-    const configObj = rawConfig as Record<string, unknown>;
-    securityConfig = { security: configObj.security as SecurityConfig['security'] };
-    mdConfig = configObj.md as Record<string, unknown> | undefined;
   } catch (e) {
     // Fail closed: keep the secure defaults above and warn loudly — a broken
     // config must never silently disable the app's chosen security policy.

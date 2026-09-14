@@ -1497,7 +1497,7 @@ component App {
   return <Md content="### Hi" />;
 }`;
   const r = renderPage(source, 'App', {}, new Map(), { hydrate: true }) as { body: string };
-  assert(r.body.startsWith('<!--vsk--><div><div class="vesk-md">'), `hydrate wrapper missing: ${r.body}`);
+  assert(r.body.startsWith('<!--vsk--><span style="display:contents"><div class="vesk-md">'), `hydrate wrapper missing: ${r.body}`);
   assert(r.body.includes('<h3 id="hi">Hi</h3>'), `markdown missing in hydrate output: ${r.body}`);
 });
 

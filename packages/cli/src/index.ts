@@ -3,8 +3,8 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { defineConfig, definePlugin, preset, validateConfig } from '@vesk/compiler/src/config';
-import type { VeskConfig, VeskSecurity } from '@vesk/compiler/src/types';
+import { loadVeskConfig } from '@vesk/adapter/src/load-config';
+import type { VeskSecurity } from '@vesk/compiler/src/types';
 import { setRedactLogging, setRuntimeModule } from '@vesk/compiler/src/server-utils';
 import { build, startProdServer } from '@vesk/adapter/src/index';
 import { runSeoAudit } from '@vesk/adapter/src/seo-audit';
@@ -89,35 +89,8 @@ function loadEnvFiles(projectDir: string) {
 
 async function loadConfig(projectDir: string) {
   loadEnvFiles(projectDir);
-
-  const jsPath = join(projectDir, 'vesk.config.js');
-  const tsPath = join(projectDir, 'vesk.config.ts');
-  let configPath: string | null = null;
-  if (existsSync(jsPath)) configPath = jsPath;
-  else if (existsSync(tsPath)) configPath = tsPath;
-
-  if (!configPath) return {};
-
-  let raw: unknown;
-  if (configPath.endsWith('.ts')) {
-    const { transpile } = await import('typescript');
-    const src = readFileSync(configPath, 'utf-8');
-    let js = transpile(src, { module: 99, target: 99 });
-    js = js.replace(/import\s+\{[^}]*\}\s*from\s+['"]@vesk\/compiler['"]\s*;?\s*/g, '');
-    js = `const { defineConfig, definePlugin, preset } = globalThis.__vesk_inject;\n` + js;
-    const tmpFile = join(projectDir, '.vesk', 'config.tmp.js');
-    mkdirSync(dirname(tmpFile), { recursive: true });
-    writeFileSync(tmpFile, js, 'utf-8');
-    (globalThis as Record<string, unknown>).__vesk_inject = { defineConfig, definePlugin, preset };
-
-    raw = (await import(tmpFile)).default;
-    delete (globalThis as Record<string, unknown>).__vesk_inject;
-  } else {
-    raw = (await import(configPath)).default;
-  }
-
-  const config = (typeof defineConfig === 'function' ? defineConfig(raw as VeskConfig) : raw) as VeskConfig;
-  if (typeof validateConfig === 'function') validateConfig(config);
+  const config = await loadVeskConfig(projectDir);
+  if (!config) return {};
 
   const sec = config.security;
   if (sec !== undefined && sec !== false && typeof sec === 'object' && (sec as VeskSecurity).redactLogs !== false) {
