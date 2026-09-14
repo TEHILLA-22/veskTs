@@ -324,9 +324,13 @@ export async function ssg(
   const cssLink = cssUrls.map(u => `\t<link rel="stylesheet" href="${u}" />\n`).join('');
 
   const renderCtx: import('@vesk/types').RenderPluginContext = { sourcePath: options.sourcePath as string | undefined };
-  let finalHead = ['\t<meta charset="utf-8" />', '\t<meta name="viewport" content="width=device-width, initial-scale=1" />'].join('\n');
-  if (cssLink) finalHead += '\n' + cssLink.trimEnd();
-  if (headHtml) finalHead += '\n' + headHtml.split('\n').map((l) => '\t' + l).join('\n');
+  const baseHeadParts: string[] = [];
+  const lowerHead = (headHtml || '').toLowerCase();
+  if (!lowerHead.includes('charset')) baseHeadParts.push('\t<meta charset="utf-8" />');
+  if (!lowerHead.includes('viewport')) baseHeadParts.push('\t<meta name="viewport" content="width=device-width, initial-scale=1" />');
+  let finalHead = baseHeadParts.join('\n');
+  if (cssLink) finalHead += (finalHead ? '\n' : '') + cssLink.trimEnd();
+  if (headHtml) finalHead += (finalHead ? '\n' : '') + headHtml.split('\n').map((l) => '\t' + l).join('\n');
   finalHead = await applyHeadInjects(
     finalHead,
     { plugins: options.plugins as RenderPluginLike[] | undefined, headExtra: options.headExtra as string | undefined },
@@ -432,7 +436,10 @@ export async function renderFullPage(
     const dataScripts = buildDataScripts(ssrProps, ssrData, options.externalDataScript);
     const dataScriptBlock = dataScripts.length > 0 ? '\n' + dataScripts.join('\n') + '\n' : '';
 
-    const headLines = ['\t<meta charset="utf-8" />', '\t<meta name="viewport" content="width=device-width, initial-scale=1" />'];
+    const lowerHeadFull = (headHtml || '').toLowerCase();
+    const headLines: string[] = [];
+    if (!lowerHeadFull.includes('charset')) headLines.push('\t<meta charset="utf-8" />');
+    if (!lowerHeadFull.includes('viewport')) headLines.push('\t<meta name="viewport" content="width=device-width, initial-scale=1" />');
     if (cssLink) headLines.push(cssLink.trimEnd());
     if (headHtml) headLines.push('\t' + headHtml.split('\n').join('\n\t'));
 
@@ -506,7 +513,7 @@ export function renderPageStream(
   const cssUrls: string[] = options.cssUrls || (options.cssUrl ? [options.cssUrl] : []);
   const cssLink = cssUrls.map(u => `\t<link rel="stylesheet" href="${u}" />\n`).join('');
 
-  const headParts: string[] = ['\t<meta charset="utf-8" />', '\t<meta name="viewport" content="width=device-width, initial-scale=1" />'];
+  const headParts: string[] = [];
   if (cssLink) headParts.push(cssLink.trimEnd());
   if (options.security) {
     const sec = options.security;
@@ -514,6 +521,7 @@ export function renderPageStream(
     if (sec.contentSecurityPolicy !== false) headParts.push(`\t<meta http-equiv="Content-Security-Policy" content="${quoteAttr(sec.contentSecurityPolicy as string || "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'")}" />`);
     if (sec.autoEscape !== false) headParts.push('\t<!-- vesk: auto-escape enabled -->');
   }
+  let streamHeadHtml: string | null = null;
   if (targetComp) {
     let headHtml = renderHeadHtml(targetComp, ssrProps);
     if (options.pageHead) {
@@ -525,8 +533,16 @@ export function renderPageStream(
         }
       }
     }
-    if (headHtml) headParts.push('\t' + headHtml.split('\n').join('\n\t'));
+    if (headHtml) {
+      streamHeadHtml = headHtml;
+      headParts.push('\t' + headHtml.split('\n').join('\n\t'));
+    }
   }
+  const lowerStreamHead = (streamHeadHtml || '').toLowerCase();
+  const baseStream: string[] = [];
+  if (!lowerStreamHead.includes('charset')) baseStream.push('\t<meta charset="utf-8" />');
+  if (!lowerStreamHead.includes('viewport')) baseStream.push('\t<meta name="viewport" content="width=device-width, initial-scale=1" />');
+  headParts.unshift(...baseStream);
 
   yield '<!DOCTYPE html>\n<html>\n<head>\n';
   const finalHead = await applyHeadInjects(

@@ -1349,7 +1349,11 @@ export async function startDevServer(port: number, projectDir: string, config: R
           if (security.contentSecurityPolicy !== false) secMeta += `\t<meta http-equiv="Content-Security-Policy" content="${((security.contentSecurityPolicy as string) || "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'").replace(/"/g, '&quot;')}" />\n`;
           if (security.autoEscape !== false) secMeta += '\t<!-- vesk: auto-escape enabled -->\n';
         }
-        let headBlock = '\t<meta charset="utf-8" />\n\t<meta name="viewport" content="width=device-width, initial-scale=1" />\n' + cssLinkTags() + secMeta + (head ? '\t' + head.split('\n').join('\n\t') + '\n' : '');
+        const lowerHeadBlock = (head || '').toLowerCase();
+        const baseHeadBlock: string[] = [];
+        if (!lowerHeadBlock.includes('charset')) baseHeadBlock.push('\t<meta charset="utf-8" />');
+        if (!lowerHeadBlock.includes('viewport')) baseHeadBlock.push('\t<meta name="viewport" content="width=device-width, initial-scale=1" />');
+        let headBlock = baseHeadBlock.join('\n') + (baseHeadBlock.length ? '\n' : '') + cssLinkTags() + secMeta + (head ? '\t' + head.split('\n').join('\n\t') + '\n' : '');
         headBlock = await applyHeadInjects(headBlock, { plugins: getActiveDevPlugins() as VeskPlugin[] }, { sourcePath: url.pathname });
         html = `<!DOCTYPE html>\n<html>\n<head>\n${headBlock}</head>\n<body>\n<div id="root">\n${prettifyHtml(body)}\n</div>${dataScriptBlock}\n</body>\n</html>`;
         html = injectDevScripts(html);
@@ -1414,7 +1418,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
         }
       }
 
-      const headParts: string[] = ['\t<meta charset="utf-8" />', '\t<meta name="viewport" content="width=device-width, initial-scale=1" />'];
+      const headParts: string[] = [];
       const cssTags = cssLinkTags();
       if (cssTags) headParts.push(cssTags.trimEnd());
       if (security) {
@@ -1423,6 +1427,11 @@ export async function startDevServer(port: number, projectDir: string, config: R
         if (security.autoEscape !== false) headParts.push('\t<!-- vesk: auto-escape enabled -->');
       }
       if (head) headParts.push('\t' + head.split('\n').join('\n\t'));
+      const lowerStream = (head || '').toLowerCase();
+      const baseStream: string[] = [];
+      if (!lowerStream.includes('charset')) baseStream.push('\t<meta charset="utf-8" />');
+      if (!lowerStream.includes('viewport')) baseStream.push('\t<meta name="viewport" content="width=device-width, initial-scale=1" />');
+      headParts.unshift(...baseStream);
       yield '<!DOCTYPE html>\n<html>\n<head>\n';
       yield (await applyHeadInjects(headParts.join('\n'), { plugins: getActiveDevPlugins() as VeskPlugin[] }, { sourcePath: url.pathname })) + '\n';
       yield '</head>\n<body>\n<div id="root">\n';

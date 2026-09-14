@@ -55,6 +55,7 @@ const stages = ["preprocess", "parse", "ir", "codegen"]
 export component CodeShowcase {
 	const &[target] = track("ssr")
 	const &[stage] = track(0)
+	effect(() => console.log('[CodeShowcase] target', target))
 
 	effect(() => {
 		const id = setInterval(() => {
@@ -93,17 +94,17 @@ export component CodeShowcase {
 							<div class="flex min-w-0">
 								<button
 									type="button"
-									onClick={() => target = "ssr"}
+									onClick={() => { console.log('[CodeShowcase] click ssr', target); target = "ssr" }}
 									class={target === "ssr" ? "shrink-0 px-3 py-1 font-mono text-[11px] bg-foreground text-background" : "shrink-0 px-3 py-1 font-mono text-[11px] text-muted-foreground hover:text-foreground"}
 								>ssr.html</button>
 								<button
 									type="button"
-									onClick={() => target = "web"}
+									onClick={() => { console.log('[CodeShowcase] click web', target); target = "web" }}
 									class={target === "web" ? "shrink-0 px-3 py-1 font-mono text-[11px] bg-foreground text-background" : "shrink-0 px-3 py-1 font-mono text-[11px] text-muted-foreground hover:text-foreground"}
 								>about.js</button>
 								<button
 									type="button"
-									onClick={() => target = "native"}
+									onClick={() => { console.log('[CodeShowcase] click native', target); target = "native" }}
 									class={target === "native" ? "shrink-0 px-3 py-1 font-mono text-[11px] bg-foreground text-background" : "shrink-0 px-3 py-1 font-mono text-[11px] text-muted-foreground hover:text-foreground"}
 								>About.kt</button>
 							</div>

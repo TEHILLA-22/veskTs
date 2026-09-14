@@ -798,13 +798,100 @@ function emitTryCatch(ctx: Ctx, node: TryCatch, tracked: Map<string, TrackedInfo
 }
 
 function emitOpaque(ctx: Ctx, node: OpaqueDynamicRegion, tracked: Map<string, TrackedInfo>, effTarget: string | null, parentVar?: string): string | null {
+  const hyd = ctx.hydrate;
+  const parent = parentVar || '$root';
+  const isOpaque = (n: unknown): n is OpaqueDynamicRegion => !!n && typeof (n as any).condition !== 'undefined';
+  if (hyd && node.alternateNodes.length === 1 && isOpaque(node.alternateNodes[0])) {
+    const chain: { cond: string; nodes: IRNode[] }[] = [];
+    let cur: OpaqueDynamicRegion | null = node;
+    let finalElse: IRNode[] | null = null;
+    while (cur) {
+      chain.push({ cond: transformTracked(cur.condition as any, tracked), nodes: cur.consequentNodes });
+      if (cur.alternateNodes.length === 1 && isOpaque(cur.alternateNodes[0])) {
+        cur = cur.alternateNodes[0] as OpaqueDynamicRegion;
+      } else {
+        finalElse = cur.alternateNodes.length > 0 ? cur.alternateNodes : null;
+        cur = null;
+      }
+    }
+    const anchor = ctx.n();
+    const endAnchor = ctx.n();
+    const effectsVar = ctx.n();
+    ctx.push(`const ${anchor} = document.createComment('if');`);
+    ctx.push(`let ${effectsVar} = [];`);
+    ctx.push(`const ${endAnchor} = document.createComment('if-end');`);
+    const asyncKw = ctx.isAsyncScope ? 'await ' : '';
+    const fnOpen = ctx.isAsyncScope ? 'async () => {' : '() => {';
+    const renderNames: string[] = [];
+    for (let i = 0; i < chain.length; i++) {
+      const rn = ctx.n();
+      renderNames.push(rn);
+      ctx.push(`const ${rn} = ${fnOpen}`);
+      const cl = ctx.n();
+      ctx.push(indent(`const ${cl} = [];`));
+      for (const n of chain[i].nodes) {
+        const v = emitNode(ctx, n, tracked, effectsVar, parentVar);
+        if (v) ctx.push(indent(`${cl}.push(${v});`));
+      }
+      ctx.push(indent(`__place(${anchor}, ${endAnchor}, ${cl}, ${parent});`));
+      ctx.push(`};`);
+    }
+    let finalRender: string | null = null;
+    if (finalElse) {
+      finalRender = ctx.n();
+      ctx.push(`const ${finalRender} = ${fnOpen}`);
+      const cl2 = ctx.n();
+      ctx.push(indent(`const ${cl2} = [];`));
+      for (const n of finalElse) {
+        const v = emitNode(ctx, n, tracked, effectsVar, parentVar);
+        if (v) ctx.push(indent(`${cl2}.push(${v});`));
+      }
+      ctx.push(indent(`__place(${anchor}, ${endAnchor}, ${cl2}, ${parent});`));
+      ctx.push(`};`);
+    }
+    let init = `if (${chain[0].cond}) { ${asyncKw}${renderNames[0]}(); }`;
+    for (let i = 1; i < chain.length; i++) init += ` else if (${chain[i].cond}) { ${asyncKw}${renderNames[i]}(); }`;
+    if (finalRender) init += ` else { ${asyncKw}${finalRender}(); }`;
+    ctx.push(init);
+    let branchInit: string;
+    if (chain.length === 1 && finalRender) branchInit = `(${chain[0].cond} ? 0 : 1)`;
+    else if (chain.length === 2 && finalRender) branchInit = `(${chain[0].cond} ? 0 : (${chain[1].cond} ? 1 : 2))`;
+    else if (chain.length === 2 && !finalRender) branchInit = `(${chain[0].cond} ? 0 : (${chain[1].cond} ? 1 : -1))`;
+    else branchInit = `(${chain[0].cond} ? 0 : -1)`;
+    let effInner = `if (__new === 0) { ${asyncKw}${renderNames[0]}(); }`;
+    for (let i = 1; i < chain.length; i++) effInner += ` else if (__new === ${i}) { ${asyncKw}${renderNames[i]}(); }`;
+    if (finalRender) effInner += ` else { ${asyncKw}${finalRender}(); }`;
+    const effBody = `effect(${ctx.isAsyncScope ? 'async () => {' : '() => {'}
+        if (__first) { __first = false; return; }
+        const __new = ${branchInit};
+        if (__new !== __iv) {
+          for (const e of ${effectsVar}) destroy_block(e);
+          ${effectsVar}.length = 0;
+          __cleanup(${anchor}, ${endAnchor});
+          ${effInner}
+          __iv = __new;
+        }
+      });`;
+    if (effTarget) {
+      ctx.push(`${effTarget}.push((() => {
+      let __iv = ${branchInit};
+      let __first = true;
+      return ${effBody}
+    })());`);
+    } else {
+      ctx.effects.push(`{
+      let __iv = ${branchInit};
+      let __first = true;
+      ${effBody}
+    }`);
+    }
+    return null;
+  }
   const condExpr = transformTracked(node.condition as any, tracked);
   const hasElse = node.alternateNodes.length > 0;
   const anchor = ctx.n();
   const endAnchor = ctx.n();
   const effectsVar = ctx.n();
-  const hyd = ctx.hydrate;
-  const parent = parentVar || '$root';
 
   ctx.push(`const ${anchor} = document.createComment('if');`);
   if (!hyd) ctx.push(`${parent}.appendChild(${anchor});`);

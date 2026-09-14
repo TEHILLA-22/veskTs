@@ -355,30 +355,59 @@ export function NavLink(
 	if (typeof document === 'undefined') {
 		return Link(props, registry, hydrate);
 	}
-	if (__isHydrating) {
-		let a: HTMLAnchorElement | null = null;
-		if (hydrate && hydrate.nextElement) {
-			// Walk the claim marker like Link does: this consumes (removes) the
-			// SSR `<!--vsk-->` marker so no leftovers survive the hydration pass.
-			a = hydrate.nextElement('a') as HTMLAnchorElement;
-			if (a && !a.parentNode && hydrate.root) {
-				const existing = hydrate.root.querySelector('a');
-				if (existing) a = existing as HTMLAnchorElement;
-			}
-		} else {
-			a = document.querySelector(`a[href="${props.href}"]`) as HTMLAnchorElement;
+	// Always prefer the walker when it is available, regardless of the global
+	// __isHydrating flag. The flag is only a hint for the querySelector
+	// fallback; relying on it to gate walker claims leaves SSR markers
+	// unconsumed when the flag is stale (layout-chain hydration) and
+	// produces duplicate anchor text.
+	if (hydrate && hydrate.nextElement) {
+		let a = hydrate.nextElement('a') as HTMLAnchorElement;
+		if (a && !a.parentNode && hydrate.root) {
+			const existing = hydrate.root.querySelector('a');
+			if (existing) a = existing as HTMLAnchorElement;
 		}
-		if (a) {
-			applyLinkDom(a, props, props.href);
+		const claimed = a ? a.parentNode !== null : false;
+		if (!a) a = document.createElement('a');
+		applyLinkDom(a, props, props.href);
+		if (props.children != null) {
+			if (typeof props.children === 'string' || typeof props.children === 'number') {
+				a.textContent = String(props.children);
+			} else {
+				a.replaceChildren();
+				mountLinkChildren(a, props.children);
+			}
+		}
+		a.addEventListener('click', (e) => {
+			if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+			if (props.target === '_blank') return;
+			if (!isRouteHref(props.href)) return;
+			e.preventDefault();
+			e.stopPropagation();
+			const nav = useNavigate();
+			nav(props.href);
+		});
+		const path = usePathname();
+		const routeHref = routeHrefOf(props.href);
+		const isActive = routeHref === path || (routeHref !== '/' && path.startsWith(routeHref) && (path.length === routeHref.length || path[routeHref.length] === '/' || path[routeHref.length] === '?'));
+		if (isActive) {
+			a.classList.add(props.activeClass || 'active');
+			if (props.ariaCurrent !== false) a.setAttribute('aria-current', 'page');
+		}
+		return claimed ? document.createDocumentFragment() : a;
+	}
+	if (__isHydrating) {
+		const q = document.querySelector(`a[href="${props.href}"]`) as HTMLAnchorElement;
+		if (q) {
+			applyLinkDom(q, props, props.href);
 			if (props.children != null) {
 				if (typeof props.children === 'string' || typeof props.children === 'number') {
-					a.textContent = String(props.children);
+					q.textContent = String(props.children);
 				} else {
-					a.replaceChildren();
-					mountLinkChildren(a, props.children);
+					q.replaceChildren();
+					mountLinkChildren(q, props.children);
 				}
 			}
-			a.addEventListener('click', (e) => {
+			q.addEventListener('click', (e) => {
 				if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
 				if (props.target === '_blank') return;
 				if (!isRouteHref(props.href)) return;
@@ -391,11 +420,11 @@ export function NavLink(
 			const routeHref = routeHrefOf(props.href);
 			const isActive = routeHref === path || (routeHref !== '/' && path.startsWith(routeHref) && (path.length === routeHref.length || path[routeHref.length] === '/' || path[routeHref.length] === '?'));
 			if (isActive) {
-				a.classList.add(props.activeClass || 'active');
-				if (props.ariaCurrent !== false) a.setAttribute('aria-current', 'page');
+				q.classList.add(props.activeClass || 'active');
+				if (props.ariaCurrent !== false) q.setAttribute('aria-current', 'page');
 			}
-			const claimed = a.parentNode !== null;
-			return claimed ? document.createDocumentFragment() : a;
+			const claimed = q.parentNode !== null;
+			return claimed ? document.createDocumentFragment() : q;
 		}
 	}
 	const a = Link(props, registry, hydrate) as HTMLAnchorElement;
