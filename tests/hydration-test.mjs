@@ -1169,6 +1169,14 @@ async function main() {
         assert(ct.includes('text/html'), `${route} serves HTML not JSON (content-type: ${ct})`);
         const scriptCount = await page.evaluate(() => (document.documentElement.outerHTML.match(/ssr-data\.js/g) || []).length);
         const expected = DATA_ROUTES.has(route) ? 1 : 0;
+        if (scriptCount !== expected) {
+          const dbg = await page.evaluate(() => ({
+            srcs: Array.from(document.querySelectorAll('script[src]')).map(s => s.src),
+            innerCount: (document.documentElement.innerHTML.match(/ssr-data\.js/g) || []).length,
+            hasVar: typeof window.__vsk_ssr_data !== 'undefined',
+          }));
+          console.log('  [leak-debug]', route, JSON.stringify(dbg, null, 1));
+        }
         assert(scriptCount === expected, `${route} has ${scriptCount} ssr-data script ref(s) (expected ${expected})`);
         if (scriptCount !== expected) leakChecks.push(route + ':' + scriptCount);
         if (route === '/broken') {

@@ -689,6 +689,42 @@ it('renderFullPage serializes inline createResource data', async () => {
   assert(html.includes('__vesk_ssr_data') || true, `ssr data script might not be present without createResource call`);
 });
 
+it('renderFullPage handoff survives a forked sink via global write-through', async () => {
+  // A sink registered to a forked AsyncLocalStorage store returns empty from
+  // snapshot(); setSsrData's globalThis mirror must still reach the data
+  // scripts. Expression-mode body here, statement mode in the next test.
+  const source = `import { setSsrData } from '@vesk/runtime'
+  component App {
+    return <p>{(setSsrData('fork-key', { via: 'global' }), 'Ok')}</p>
+  }
+  `;
+  const html = await renderFullPage(source, 'App', {});
+  show('  html', html.slice(0, 600));
+  assert(html.includes('Ok'), `body: ${html.slice(300, 600)}`);
+  assert(html.includes('fork-key'), `fork-key should be in handoff: ${html.slice(300, 900)}`);
+  assert(html.includes('via'), `fork value serialized: ${html.slice(300, 900)}`);
+});
+
+it('renderFullPage does not leak a previous render handoff', async () => {
+  const withData = `import { setSsrData } from '@vesk/runtime'
+  component App {
+    setSsrData('leak-key', true)
+    <p>Has data</p>
+  }
+  `;
+  const html1 = await renderFullPage(withData, 'App', {});
+  show('  html1', html1.slice(0, 600));
+  assert(html1.includes('leak-key'), `first render emits its data: ${html1.slice(300, 900)}`);
+  const withoutData = `component App {
+    <p>No data</p>
+  }
+  `;
+  const html2 = await renderFullPage(withoutData, 'App', {});
+  show('  html2', html2.slice(0, 600));
+  assert(html2.includes('No data'), `second render body: ${html2.slice(300, 600)}`);
+  assert(!html2.includes('leak-key'), `second render must not inherit prior handoff: ${html2.slice(300, 900)}`);
+});
+
 it('load function merged with existing props', async () => {
   const source = `component App(props) {
     <h1>{props.greeting}</h1>

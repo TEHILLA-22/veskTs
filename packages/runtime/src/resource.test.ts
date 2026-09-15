@@ -5,7 +5,8 @@
  * staleTime caching, keepPreviousData, retry + backoff, timeout, enabled,
  * mutate(), abort-on-destroy, and the SSR pass-loop integration.
  */
-import { useFetch, createResource, mutate, clearSsrData, HttpError, TimeoutError } from '@vesk/runtime/src/resource';
+import { useFetch, createResource, mutate, clearSsrData, setSsrData, setSsrSink, getSsrData, HttpError, TimeoutError } from '@vesk/runtime/src/resource';
+import type { SsrDataSink } from '@vesk/runtime/src/resource';
 import { root, destroy_block } from '@vesk/runtime/src/ripple-blocks';
 import { track, get, run_block } from '@vesk/runtime/src/ripple-runtime';
 import type { Tracked } from '@vesk/runtime/src/ripple-runtime';
@@ -401,6 +402,42 @@ it('dedups concurrent SSR requests across components', async () => {
   expect(mock.calls.length).toBe(1);
   mock.restore();
   cleanupGlobals();
+});
+
+it('setSsrData mirrors into globalThis even when a sink is registered (fork-safe handoff)', async () => {
+  cleanupGlobals();
+  let sinkWrites: Array<[string, unknown]> = [];
+  const fakeSink: SsrDataSink = {
+    set: (k, v) => { sinkWrites.push([k, v]); },
+    get: () => undefined,
+    snapshot: () => Object.fromEntries(sinkWrites),
+    clear: () => { sinkWrites = []; },
+  };
+  setSsrSink(fakeSink);
+  try {
+    (globalThis as any).__vsk_ssr = true;
+    setSsrData('fork-key', { via: 'global' });
+    expect(sinkWrites.length).toBe(1);
+    expect((globalThis as any).__vsk_ssr_data['fork-key']).toEqual({ via: 'global' });
+    // Sink miss falls back to the global mirror
+    expect(getSsrData('fork-key')).toEqual({ via: 'global' });
+    // getSsrData prefers the sink when it hits
+    const answeringSink: SsrDataSink = {
+      set: (k, v) => { sinkWrites.push([k, v]); },
+      get: () => ({ via: 'sink' }),
+      snapshot: () => Object.fromEntries(sinkWrites),
+      clear: () => {},
+    };
+    setSsrSink(answeringSink);
+    expect(getSsrData('fork-key')).toEqual({ via: 'sink' });
+    setSsrSink(fakeSink);
+    clearSsrData();
+    expect((globalThis as any).__vsk_ssr_data).toBe(undefined);
+    expect(sinkWrites.length).toBe(0);
+  } finally {
+    setSsrSink(null);
+    cleanupGlobals();
+  }
 });
 
 it('routes SSR fetches through the __vesk_ssr_fetch hook, not global fetch', async () => {

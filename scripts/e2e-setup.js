@@ -42,14 +42,17 @@ try { rmSync(outDir, { recursive: true }); } catch {}
 mkdirSync(resolve(outDir, 'static'), { recursive: true });
 
 console.error('Building production (code-split)...');
-await build(appDir, { outDir, publicDir, codeSplit: true });
+const configMod = await import(resolve(root, 'test-app/vesk.config.ts'));
+const config = configMod.default || {};
+const plugins = config.plugins || [];
+await build(appDir, { outDir, publicDir, codeSplit: true, plugins });
 
 console.error('Starting production server...');
 const prodServer = await startProdServer(outDir, { port: PROD_PORT });
 await waitForPort(PROD_PORT);
 
 console.error('Starting dev server...');
-const devServer = await startDevServer(appDir, { port: DEV_PORT, publicDir, block: false });
+const devServer = await startDevServer(appDir, { port: DEV_PORT, publicDir, block: false, plugins });
 await waitForPort(DEV_PORT);
 
 console.log('E2E_SERVERS_READY');

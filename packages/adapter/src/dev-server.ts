@@ -3,7 +3,7 @@ import { resolve, extname, dirname } from 'node:path';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { stripCodeTypes } from '@vesk/compiler/src/strip-ts';
-import { DEFAULT_MAX_BODY_BYTES } from '@vesk/compiler/src/server-codegen';
+import { DEFAULT_MAX_BODY_BYTES, safeJsonForScript } from '@vesk/compiler/src/server-codegen';
 import { build } from '@vesk/adapter/src/index';
 import { buildErrorPayload, createHmrServer } from './hmr';
 import * as hmrApi from './hmr';
@@ -431,7 +431,7 @@ export async function startDevServer(appDir: string, options?: DevServerOptions)
   async function doBuild(): Promise<void> {
     const start = Date.now();
     try {
-      const result = await build(appDir, { outDir: devDir, publicDir, hmr: true });
+      const result = await build(appDir, { outDir: devDir, publicDir, hmr: true, plugins: options?.plugins });
       const configPath = resolve(devDir, 'config.json');
       if (existsSync(configPath)) {
         config = JSON.parse(readFileSync(configPath, 'utf-8')) as Manifest;
@@ -557,6 +557,26 @@ await doBuild().catch(() => {});
       return;
     }
 
+    // External data scripts (/ssr-data.js?t=...) are emitted by
+    // storeDataScriptGlobal once a render serializes SSR data. Without this
+    // route the dev SPA fallback served the HTML document as the script's
+    // payload, which the client then failed to parse as JavaScript
+    // ("Unexpected token '<'") — dev pages never serialized data before so
+    // the tag was never emitted and this was unreachable. Mirrors prod-server.
+    if (url.pathname === '/ssr-data.js') {
+      const token = url.searchParams.get('t') || '';
+      const store = (globalThis as Record<string, unknown>).__vsk_ssr_data_store as Record<string, { props?: Record<string, unknown>; ssrData?: Record<string, unknown> }> | undefined;
+      const payload = store?.[token];
+      if (payload) delete store[token];
+      console.error(`[ssr-data-trace] ${url.pathname} token=${token.slice(0,6)} referer=${req.headers['referer'] || req.headers['referrer'] || '-'} payload=${payload ? JSON.stringify({ props: Object.keys(payload.props || {}), data: Object.keys(payload.ssrData || {}) }) : 'NONE'}`);
+      const lines: string[] = [];
+      if (payload?.props) lines.push(`globalThis.__vesk_props = ${safeJsonForScript(JSON.stringify(payload.props))};`);
+      if (payload?.ssrData) lines.push(`globalThis.__vsk_ssr_data = ${safeJsonForScript(JSON.stringify(payload.ssrData))};`);
+      res.writeHead(200, { 'Content-Type': 'application/javascript', 'Cache-Control': 'no-store' });
+      res.end(lines.join('\n') || '// no ssr data');
+      return;
+    }
+
     if (url.pathname.startsWith('/_vesk/static/')) {
       const relPath = url.pathname.slice('/_vesk/static/'.length);
       const staticPath = resolveWithin(resolve(devDir, 'static'), relPath);
@@ -623,10 +643,13 @@ await doBuild().catch(() => {});
               const body = await response.text();
               const headers = Object.fromEntries(response.headers);
               const contentType = headers['content-type'] || '';
-              let finalBody = body;
-              if (contentType.includes('text/html')) {
-                finalBody = injectDevScripts(body);
+let finalBody = body;
+            if (contentType.includes('text/html')) {
+              finalBody = injectDevScripts(body);
+              if (finalBody.includes('/ssr-data.js')) {
+                console.error(`[body-trace] ${url.pathname} HTML body carries ssr-data ref (was-in-body=${body.includes('/ssr-data.js')})`);
               }
+            }
               res.writeHead(response.status, headers);
               res.end(finalBody);
               return;

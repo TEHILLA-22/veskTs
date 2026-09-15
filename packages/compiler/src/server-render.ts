@@ -99,7 +99,7 @@ export function render(
   const isAsyncComp = !!(targetComp && (targetComp.isAsync || targetComp.ssrAwait));
 
   (globalThis as any).__vsk_ssr = true;
-  (globalThis as any).__vsk_ssr_token = Math.random().toString(36).slice(2);
+  if (!(globalThis as any).__vsk_ssr_token) (globalThis as any).__vsk_ssr_token = Math.random().toString(36).slice(2);
   const renderToken = (globalThis as any).__vsk_ssr_token;
   if (isAsyncComp) {
     return withSsrStore(() => (async () => {
@@ -108,6 +108,7 @@ export function render(
         bodyHtml = await renderFn(props, fullRegistry, scopedVesk(renderFn, __vesk));
       } finally {
         delete (globalThis as any).__vsk_ssr;
+        await settleSsrPromises(renderToken);
         clearSsrCells(renderToken);
       }
       return bodyHtml;
@@ -151,8 +152,13 @@ export function renderPage(
 
   const doRender = (ssrProps: Record<string, unknown>): RenderPageResult | Promise<RenderPageResult> => {
     (globalThis as any).__vsk_ssr = true;
-    (globalThis as any).__vsk_ssr_token = Math.random().toString(36).slice(2);
+    // Reuse an in-flight render token: the generated adapter handler renders
+    // page -> layouts -> document sequentially within one request, and all of
+    // them must share a single data slot so the final renderFullPage merge can
+    // serialize the whole handoff. Only create when no render began yet.
+    if (!(globalThis as any).__vsk_ssr_token) (globalThis as any).__vsk_ssr_token = Math.random().toString(36).slice(2);
     const renderToken = (globalThis as any).__vsk_ssr_token;
+    pruneSsrDataSlots();
     if (targetComp && (targetComp.isAsync || targetComp.ssrAwait)) {
       return withSsrStore(() => (async () => {
         let bodyHtml: string;
@@ -160,6 +166,11 @@ export function renderPage(
           bodyHtml = await renderFn(ssrProps, fullRegistry, scopedVesk(renderFn, __vesk));
         } finally {
           delete (globalThis as any).__vsk_ssr;
+          // Settle before cleanup: the fetch resolution callbacks write the
+          // SSR data (flat + per-token slot), and without this the promises
+          // were deleted by clearSsrCells before they ever resolved — the
+          // handoff came back empty and hydration claimed stale SSR nodes.
+          await settleSsrPromises(renderToken);
           clearSsrCells(renderToken);
         }
         return {
@@ -174,9 +185,19 @@ export function renderPage(
       bodyHtml = withSsrStore(() => renderFn(ssrProps, fullRegistry, scopedVesk(renderFn, __vesk)));
     } finally {
       delete (globalThis as any).__vsk_ssr;
-      clearSsrCells(renderToken);
     }
     const headHtml = targetComp ? renderHeadHtml(targetComp, ssrProps) : '';
+    const pending = (globalThis as any)[`__vsk_ssr_promises_${renderToken}`];
+    if (pending && pending.length > 0) {
+      // A sync component still started server resources (useFetch): settle them
+      // before returning so the handoff serializes real data, not loading state.
+      return withSsrStore(() => (async () => {
+        await settleSsrPromises(renderToken);
+        clearSsrCells(renderToken);
+        return { body: bodyHtml as string, head: headHtml, props: ssrProps };
+      })());
+    }
+    clearSsrCells(renderToken);
     return { body: bodyHtml as string, head: headHtml, props: ssrProps };
   };
 
@@ -200,12 +221,39 @@ function clearSsrCells(token: string | undefined): void {
   if (!token) return;
   delete (globalThis as any)[`__vsk_ssr_promises_${token}`];
   delete (globalThis as any)[`__vsk_ssr_failures_${token}`];
-  delete (globalThis as any).__vsk_ssr_token;
   const cells = (globalThis as any).__vsk_ssr_cells;
   if (!cells || !(cells instanceof Map)) return;
   for (const k of cells.keys()) {
     if (typeof k === 'string' && k.startsWith(token)) cells.delete(k);
   }
+}
+
+/**
+ * Await every server resource promise registered under a render token. The
+ * fetch callbacks call setSsrData (flat + per-token slot) once they resolve,
+ * so a render MUST settle before cleanup or its handoff serializes nothing.
+ */
+async function settleSsrPromises(token: string | undefined): Promise<void> {
+  if (!token) return;
+  const pending = (globalThis as any)[`__vsk_ssr_promises_${token}`];
+  if (!pending || pending.length === 0) return;
+  await Promise.allSettled(pending);
+}
+
+/**
+ * Bound the per-token SSR data slots against abandonment (dev-partial
+ * renderPage / render() that never runs renderFullPage). Slots are keyed by
+ * Math.random tokens, so deleted-slot accounting by token can't be cleaned by
+ * an owning render; cap the map instead. RenderFullPage/RenderPageStream delete
+ * their own slot + token in every path, so this only guards the untracked ones.
+ */
+function pruneSsrDataSlots(): void {
+  const g = globalThis as any;
+  const keys = Object.keys(g).filter((k) => typeof k === 'string' && k.startsWith('__vsk_ssr_data_'));
+  if (keys.length <= 40) return;
+  keys.sort().slice(0, keys.length - 40).forEach((k) => {
+    delete g[k];
+  });
 }
 
 type RenderPluginLike = import('@vesk/types').VeskPlugin;
@@ -396,6 +444,18 @@ export async function renderFullPage(
 ): Promise<string> {
   return withSsrStore(async () => {
   (globalThis as any).__vsk_ssr = true;
+  // Reuse the request token when a page/layout render already started one (the
+  // generated adapter handler renders page -> layouts -> document within one
+  // process), otherwise start fresh. One request = one token = one data slot.
+  if (!(globalThis as any).__vsk_ssr_token) (globalThis as any).__vsk_ssr_token = Math.random().toString(36).slice(2);
+  const renderToken = (globalThis as any).__vsk_ssr_token;
+  pruneSsrDataSlots();
+  // Start this render's handoff store fresh: setSsrData mirrors into
+  // globalThis.__vsk_ssr_data (see resource.ts) because the AsyncLocalStorage
+  // sink snapshot can be empty when the write runs in a forked async context.
+  // Resetting here also gives the /about-after-/posts no-leak behavior the
+  // ALS isolation was introduced to fix.
+  (globalThis as any).__vsk_ssr_data = {};
   try {
     let ssrProps = { ...props };
     let serializedProps: string | null = null;
@@ -413,7 +473,23 @@ export async function renderFullPage(
     }
     const rendered = await renderPage(source, componentName, ssrProps, registry, { ...options, __vesk: options.__vesk }) as RenderPageResult;
 
-    const ssrData: Record<string, unknown> = { ...ssrSink.snapshot() };
+    // Defensive settle: page/layout renders already awaited their own SSR
+    // promises before cleanup; this covers any resource started here (loadFn).
+    await settleSsrPromises(renderToken);
+
+    // Merge the ALS sink snapshot with the request's per-token data slot. The
+    // slot is the deterministic channel for writes that happened in a forked
+    // async context (native fetch) — the sink alone can miss them. The slot is
+    // request-scoped (deleted below), so a late write can never leak into a
+    // following request the way the flat global would.
+    const slot = ((globalThis as any)[`__vsk_ssr_data_${renderToken}`] as Record<string, unknown>) || {};
+    const ssrData: Record<string, unknown> = {
+      ...ssrSink.snapshot(),
+      ...slot,
+    };
+    if (process.env.VESK_SSR_TRACE) {
+      console.error(`[render-trace] renderFullPage comp=${componentName} keys=${Object.keys(ssrData).join(',') || '∅'} slot=${Object.keys(slot).join(',') || '∅'} sink=${Object.keys(ssrSink.snapshot()).join(',') || '∅'}`);
+    }
 
     let headHtml = rendered.head;
     if (options.pageHead) {
@@ -469,6 +545,9 @@ ${dataScriptBlock}${clientScript}</body>
     return applyHtmlPlugins(docHtml, options.plugins, { sourcePath: options.sourcePath, url: (options.__vesk?.url as string) || undefined });
   } finally {
     delete (globalThis as any).__vsk_ssr;
+    delete (globalThis as any)[`__vsk_ssr_data_${renderToken}`];
+    delete (globalThis as any).__vsk_ssr_token;
+    pruneSsrDataSlots();
   }
   });
 }
@@ -554,19 +633,33 @@ export function renderPageStream(
   yield '</head>\n<body>\n<div id="root">\n';
 
   (globalThis as any).__vsk_ssr = true;
-  (globalThis as any).__vsk_ssr_token = Math.random().toString(36).slice(2);
+  // Fresh handoff store per render; see renderFullPage note.
+  (globalThis as any).__vsk_ssr_data = {};
+  if (!(globalThis as any).__vsk_ssr_token) (globalThis as any).__vsk_ssr_token = Math.random().toString(36).slice(2);
   const renderToken = (globalThis as any).__vsk_ssr_token;
+  pruneSsrDataSlots();
   let bodyHtml: string;
   try {
     bodyHtml = await Promise.resolve(renderFn(ssrProps, fullRegistry, scopedVesk(renderFn, __vesk)));
   } finally {
     delete (globalThis as any).__vsk_ssr;
+    await settleSsrPromises(renderToken);
     clearSsrCells(renderToken);
   }
 
   yield bodyHtml;
 
-  const ssrData: Record<string, unknown> = { ...ssrSink.snapshot() };
+  const slot = ((globalThis as any)[`__vsk_ssr_data_${renderToken}`] as Record<string, unknown>) || {};
+  const ssrData: Record<string, unknown> = {
+    ...ssrSink.snapshot(),
+    ...slot,
+  };
+  if (process.env.VESK_SSR_TRACE) {
+    console.error(`[render-trace] renderPageStream comp=${componentName} keys=${Object.keys(ssrData).join(',') || '∅'} slot=${Object.keys(slot).join(',') || '∅'} sink=${Object.keys(ssrSink.snapshot()).join(',') || '∅'}`);
+  }
+  delete (globalThis as any)[`__vsk_ssr_data_${renderToken}`];
+  delete (globalThis as any).__vsk_ssr_token;
+  pruneSsrDataSlots();
 
   const dataScripts = buildDataScripts(ssrProps, ssrData, options.externalDataScript);
   const dataScriptBlock = dataScripts.length > 0 ? '\n' + dataScripts.join('\n') : '';

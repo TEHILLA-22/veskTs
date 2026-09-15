@@ -106,9 +106,32 @@ function getRegistry(): Map<string, Set<ResourceHandle<unknown>>> {
 	return map;
 }
 
+// Per-render data attributed to a specific render token. The resource promise
+// callbacks that call setSsrData run outside AsyncLocalStorage scope (native
+// fetch async contexts) so they cannot be attributed via the sink/store; a
+// token captured synchronously at fetch start (startRequest) or read from the
+// live global token for synchronous writes (md hook) gives renderFullPage /
+// renderPageStream an isolated, deterministic channel that still never mixes
+// concurrent requests.
+function ssrSlotFor(token: string | undefined): Record<string, unknown> | undefined {
+	if (!token) return undefined;
+	return (g()[`__vsk_ssr_data_${token}`] as Record<string, unknown> | undefined) || undefined;
+}
+
+function writeSsrSlot(token: string | undefined, key: string, value: unknown): void {
+	if (!token) return;
+	const slot = (g()[`__vsk_ssr_data_${token}`] as Record<string, unknown> | undefined) || (g()[`__vsk_ssr_data_${token}`] = {});
+	slot[key] = value;
+}
+
 export function getSsrData(key: string): unknown {
 	const sink = ssrSink;
-	if (sink) return sink.get(key);
+	if (sink) {
+		const value = sink.get(key);
+		if (value !== undefined) return value;
+	}
+	const slot = ssrSlotFor((g().__vsk_ssr_token as string) || undefined);
+	if (slot && slot[key] !== undefined) return slot[key];
 	const store = g().__vsk_ssr_data as Record<string, unknown> | undefined;
 	if (!store) return undefined;
 	return store[key];
@@ -134,23 +157,29 @@ function getSsrFailures(): Map<string, unknown> | undefined {
 	return store;
 }
 
-export function setSsrData(key: string, value: unknown): void {
+export function setSsrData(key: string, value: unknown, ownerToken?: string): void {
 	const sink = ssrSink;
-	if (sink) {
-		sink.set(key, value);
-		return;
-	}
+	if (sink) sink.set(key, value);
+	// Also mirror into globalThis: the sink is AsyncLocalStorage-scoped and in
+	// some server bundles the write lands in a different store than the one
+	// renderFullPage/renderPageStream snapshots (duplicated ssr-store copies /
+	// native fetch async contexts). globalThis is the deterministic channel.
 	if (!g().__vsk_ssr_data) g().__vsk_ssr_data = {};
 	(g().__vsk_ssr_data as Record<string, unknown>)[key] = value;
+	// Per-render slot (see ssrSlotFor): resolved resource callbacks and the md
+	// hook must be attributed to the render that started them. A stale token can
+	// not leak into later requests — renderFullPage/renderPageStream delete the
+	// slot after merging and start fresh alongside the flat store.
+	if (ownerToken) writeSsrSlot(ownerToken, key, value);
+	else writeSsrSlot((g().__vsk_ssr_token as string) || undefined, key, value);
 }
 
 export function clearSsrData(): void {
 	const sink = ssrSink;
-	if (sink) {
-		sink.clear();
-		return;
-	}
+	if (sink) sink.clear();
 	delete g().__vsk_ssr_data;
+	const tk = g().__vsk_ssr_token as string;
+	if (tk) delete g()[`__vsk_ssr_data_${tk}`];
 }
 
 function setInto(into: Tracked, data: unknown): void {
@@ -419,12 +448,18 @@ function startRequest<T>(handle: ResourceHandle<T>, skipCache: boolean): Promise
 			return settled;
 		}
 		const existing = getInflight().get(key);
+		// Capture the render token at fetch start: the resolution callback below
+		// runs outside AsyncLocalStorage scope, so setSsrData cannot read the
+		// token from the live render context anymore. An explicit owner token
+		// keeps the data attributed to this request's render slot even when the
+		// token has been torn down by the time the fetch resolves.
+		const startToken = (g().__vsk_ssr_token as string) || undefined;
 		const prom = existing ?? runFetcher(handle, options.timeout || 0);
 		if (!existing) {
 			getInflight().set(key, prom);
 			prom.then(
 				data => {
-					setSsrData(key, data);
+					setSsrData(key, data, startToken);
 					settle(handle, data as T);
 				},
 				error => {
