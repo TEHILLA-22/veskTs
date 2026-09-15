@@ -1181,7 +1181,12 @@ async function main() {
         const ct = resp ? (resp.headers()['content-type'] || '') : '';
         assert(resp && resp.status() === 200, `${route} full load is HTTP 200 (got ${resp?.status()})`);
         assert(ct.includes('text/html'), `${route} serves HTML not JSON (content-type: ${ct})`);
-        const scriptCount = await page.evaluate(() => (document.documentElement.outerHTML.match(/ssr-data\.js/g) || []).length);
+        const scriptCount = await page.evaluate(() => {
+          const html = document.documentElement.outerHTML;
+          // CLI dev server uses /_vesk/ssr-data.js, adapter uses /ssr-data.js
+          const matches = html.match(/(?:\/_vesk\/)?ssr-data\.js/g) || [];
+          return matches.length;
+        });
         const expected = DATA_ROUTES.has(route) ? 1 : 0;
         if (scriptCount !== expected) {
           const dbg = await page.evaluate(() => ({
@@ -1278,7 +1283,8 @@ async function main() {
       const page = await browser.newPage();
       await goto(page, BASE + route, { waitUntil: 'networkidle0' });
       const html = await page.content();
-      const count = (html.match(/ssr-data\.js/g) || []).length;
+      // CLI dev server uses /_vesk/ssr-data.js, adapter uses /ssr-data.js
+      const count = (html.match(/(?:\/_vesk\/)?ssr-data\.js/g) || []).length;
       assert(count === expected, `${route} view-source has ${count} ssr-data refs (expected ${expected})`);
       await page.close();
     }
