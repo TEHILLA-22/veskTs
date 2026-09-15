@@ -47,7 +47,7 @@ jobs:
       - name: Run tests/production-hydration-test.mjs
         env:
           CHROMIUM_PATH: ${{ steps.setup.outputs.chrome-path }}
-        run: node tests/production-hydration-test.mjs
+        run: npx tsx tests/production-hydration-test.mjs
 
   dev-hydration:
     name: hydration-test.mjs — dev hydration gate

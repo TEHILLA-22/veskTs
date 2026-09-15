@@ -30,6 +30,11 @@ const PACKAGES: Record<string, PackageBuild> = {
   agentic: { name: '@vesk/agentic', entry: 'index' },
   adapter: { name: '@vesk/adapter', entry: 'index' },
   'lucide-vesk': { name: 'lucide-vesk', entry: 'index' },
+  // plugins after types — they only import @vesk/types, and test-app's
+  // vesk.config.ts imports them, so their dist must exist for e2e/dev
+  // servers on fresh checkouts (CI).
+  'plugin-pwa': { name: '@vesk/plugin-pwa', entry: 'index' },
+  'plugin-tailwind': { name: '@vesk/plugin-tailwind', entry: 'index' },
 };
 
 function newestSourceMtime(srcDir: string): number {
