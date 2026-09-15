@@ -178,6 +178,100 @@ function hasPendingChunks(nodes: RouteNode[]): string[] {
 	return urls;
 }
 
+/**
+ * Delegated route-chunk preloading for code-split routes.
+ *
+ * Uses bubbling events (`pointerover`/`focusin`) instead of `mouseenter` —
+ * `mouseenter` does NOT bubble, so a listener on `document` only fires once
+ * when the pointer enters the page and never for a specific link. That made
+ * the historic hover-prefetch dead code: the first click on a route always
+ * paid the chunk download (the paint gate) and only later visits were warm.
+ *
+ * Warming loads route chunks early so the chunk roundtrip never blocks first
+ * paint. Route DATA is deliberately left untouched here — it is fetched at
+ * navigation time exactly as before (once per visit), so SSR/initial-load and
+ * data-freshness semantics are unchanged.
+ *
+ * Also warms links already in the DOM: as a link scrolls near the viewport
+ * (IntersectionObserver, 300px margin) its chunk is preloaded for the
+ * first click. Falls back to warming the first 16 links at idle when
+ * IntersectionObserver is unavailable.
+ */
+function installLinkPrefetch(warmChunks: (href: string) => void): void {
+	if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return;
+
+	const recent = new Map<string, number>();
+	const over = (e: Event) => {
+		const target = e.target as Element | null;
+		if (!target || target.nodeType !== 1) return;
+		const link = (target as Element).closest ? (target as Element).closest('a[href]') as HTMLAnchorElement | null : null;
+		if (!link) return;
+		const href = link.getAttribute('href');
+		if (!href) return;
+		const now = Date.now();
+		if (now - (recent.get(href) || 0) < 500) return;
+		recent.set(href, now);
+		warmChunks(href);
+	};
+	document.addEventListener('pointerover', over, { passive: true });
+	document.addEventListener('focusin', over, { passive: true });
+
+	const schedule = (cb: () => void) => {
+		const ric = typeof window !== 'undefined' && typeof (window as unknown as { requestIdleCallback?: (fn: () => void, opts?: { timeout: number }) => number }).requestIdleCallback === 'function'
+			? (window as unknown as { requestIdleCallback: (fn: () => void, opts?: { timeout: number }) => number }).requestIdleCallback.bind(window)
+			: (fn: () => void) => setTimeout(fn, 250);
+		ric(() => { try { cb(); } catch { /* best-effort warmup */ } }, { timeout: 2000 });
+	};
+	schedule(() => {
+		if (typeof document.querySelectorAll !== 'function') return;
+		const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'));
+		if (anchors.length === 0) return;
+		const seen = new Set<string>();
+		let budget = 16;
+		const warm = (a: HTMLAnchorElement) => {
+			const href = a.getAttribute('href');
+			if (!href || seen.has(href) || budget-- <= 0) return;
+			seen.add(href);
+			warmChunks(href);
+		};
+		if (typeof IntersectionObserver === 'function') {
+			const io = new IntersectionObserver((entries) => {
+				for (const entry of entries) {
+					if (!entry.isIntersecting) continue;
+					warm(entry.target as HTMLAnchorElement);
+					io.unobserve(entry.target);
+				}
+				if (budget <= 0) io.disconnect();
+			}, { rootMargin: '300px' });
+			for (const a of anchors) io.observe(a);
+		} else {
+			for (const a of anchors) warm(a);
+		}
+	});
+}
+
+/**
+ * Warms the chunks backing a route link without touching route data — the
+ * data fetch stays at navigation time (once per visit), preserving SSR
+ * initial-load and freshness semantics.
+ */
+function warmRouteChunks(routeTree: RouteNode[], href: string): void {
+	if (!href) return;
+	let url: URL;
+	try {
+		url = new URL(href, typeof window !== 'undefined' ? window.location.origin : 'http://localhost');
+	} catch {
+		return;
+	}
+	const pathname = url.pathname;
+	if (typeof window !== 'undefined' && pathname === window.location.pathname && !url.search && !url.hash) return;
+	const match = matchRoute(routeTree, pathname);
+	if (!match) return;
+	const urls = hasPendingChunks(match.matchChain);
+	if (urls.length === 0) return;
+	for (const u of urls) ensureChunk(u);
+}
+
 interface RouteDataResult {
 	props?: Record<string, unknown>;
 	head?: string;
@@ -1343,10 +1437,7 @@ export function createRouter(
 			});
 
 			if (prefetch) {
-				document.addEventListener('mouseenter', (e) => {
-					const link = (e.target as Element)?.nodeType === 1 ? (e.target as Element).closest('a[href]') : null;
-					if (link) this.prefetch(link.getAttribute('href')!);
-				}, { passive: true });
+				installLinkPrefetch((href) => warmRouteChunks(this.routeTree, href));
 			}
 
 			const path = routeFromLocation(hashMode);
@@ -1691,10 +1782,7 @@ export function createFileRouter(routeTree: RouteNode[], options: FileRouterOpti
 			});
 
 			if (options.prefetch !== false) {
-				document.addEventListener('mouseenter', (e) => {
-					const link = (e.target as Element)?.nodeType === 1 ? (e.target as Element).closest('a[href]') : null;
-					if (link) router.prefetch(link.getAttribute('href')!);
-				}, { passive: true });
+				installLinkPrefetch((href) => warmRouteChunks(router.routeTree, href));
 			}
 
 			const path = routeFromLocation(hashMode).split('?')[0];

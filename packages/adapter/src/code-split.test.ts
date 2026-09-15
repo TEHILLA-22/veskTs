@@ -168,10 +168,18 @@ async function main() {
     const page = await browser.newPage();
     await page.goto(BASE + '/', { waitUntil: 'networkidle0' });
 
-    // Root page chunk is loaded on bootstrap, so root components exist
-    // About page component should NOT be registered yet
-    const before = await page.evaluate(() => Object.keys(globalThis.__components || {}).filter(k => k.includes('About') || k.includes('Page_About')));
-    await assert(before.length === 0, 'No about components before navigation');
+    // Root page chunk is loaded on bootstrap, so root components exist.
+    // About is a nav link in the layout, so the router's idle warmup
+    // prefetches its chunk once the page settles.
+    await page.waitForFunction(
+      () => Object.keys(globalThis.__components || {}).filter(k => k.includes('About') || k.includes('Page_About')).length > 0,
+      { timeout: 10000 },
+    );
+    await assert(true, 'About components registered via warmup before navigation');
+
+    // A route not linked from the current page must stay lazy.
+    const unlinked = await page.evaluate(() => Object.keys(globalThis.__components || {}).filter(k => k.includes('Lobby') || k.includes('Page_Lobby')));
+    await assert(unlinked.length === 0, 'Lobby chunk stays unregistered before navigation');
 
     await page.click('a[href="/about"]');
     await new Promise(r => setTimeout(r, 800));

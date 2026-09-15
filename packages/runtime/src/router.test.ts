@@ -140,6 +140,16 @@ function makeEl(tag) {
 function setupMockDom() {
 	if (typeof document !== 'undefined') return;
 	const head = makeEl('head');
+	// ensureChunk appends a <script> to document.head and registers onload;
+	// in the mock the script never loads, so fire onload after append to
+	// resolve chunk promises instead of hitting the 10s CHUNK_LOAD_TIMEOUT.
+	const headAppend = head.appendChild.bind(head);
+	head.appendChild = (c) => {
+		headAppend(c);
+		if (c && c.tagName === 'SCRIPT' && typeof c.onload === 'function') {
+			setTimeout(() => c.onload(), 0);
+		}
+	};
 	global.document = {
 		getElementById() { return null; },
 		createElement(tag) { return makeEl(tag); },
@@ -1079,6 +1089,112 @@ testAsync('prefetch caches route data; navigate reuses it within the cache TTL',
 		await tick(10);
 		expect(container.textContent).toBe('prefetched');
 		expect(fetchCount).toBe(1);
+	} finally {
+		globalThis.fetch = origFetch;
+	}
+});
+
+testAsync('createFileRouter start installs delegated hover prefetch (bubbling events)', async () => {
+	const container = document.createElement('div');
+	const origFetch = globalThis.fetch;
+	globalThis.fetch = async () => mockFetchResponse({ props: {}, head: '' });
+	try {
+		const tree = buildRouteTree([
+			{ path: '/', page: () => null },
+			{ path: '/about', page: (props) => {
+				const d = document.createElement('p');
+				d.textContent = 'About';
+				return d;
+			} },
+		]);
+		// Signal that /about lives in a code-split chunk.
+		tree[1]._chunk = '/_vesk/static/page-about.js';
+		const router = createFileRouter(tree, { container });
+		router.start();
+		// mouseenter does not bubble — the fix registers bubbling events so a
+		// per-link hover actually warms the chunk. Assert both are installed.
+		expect((document as any)._listeners.button).toBeFalsy();
+		const types = Object.keys((document as any)._listeners);
+		expect(types.some((t) => t === 'pointerover')).toBe(true);
+		expect(types.some((t) => t === 'focusin')).toBe(true);
+		const overFns = (document as any)._listeners['pointerover'];
+		const overFn = overFns[overFns.length - 1];
+		const headScripts = (document.head as any).children.filter((c: any) => c.tagName === 'SCRIPT');
+		overFn({ target: { nodeType: 1, closest: () => ({ getAttribute: (k) => (k === 'href' ? '/about' : null) }) } });
+		await tick(5);
+		// Hover warms the chunk (script appended to head) without touching
+		// route data — _prefetched must stay empty.
+		const scriptsAfter = (document.head as any).children.filter((c: any) => c.tagName === 'SCRIPT');
+		expect(scriptsAfter.length).toBe(headScripts.length + 1);
+		expect(router._prefetched).toBeFalsy();
+	} finally {
+		globalThis.fetch = origFetch;
+	}
+});
+
+testAsync('createRouter start installs delegated hover prefetch (bubbling events)', async () => {
+	const container = document.createElement('div');
+	const origFetch = globalThis.fetch;
+	globalThis.fetch = async () => mockFetchResponse({ props: {}, head: '' });
+	const mark = (globalThis._mark = (globalThis._mark || 0) + 1);
+	try {
+		const tree = buildRouteTree([
+			{ path: '/', page: () => null },
+			{ path: '/docs', page: (props) => document.createTextNode('Docs') },
+		]);
+		tree[1]._chunk = `/_vesk/static/page-docs-${mark}.js`;
+		const router = createRouter(tree, { container });
+		router.start();
+		const types = Object.keys((document as any)._listeners);
+		expect(types.some((t) => t === 'pointerover')).toBe(true);
+		expect(types.some((t) => t === 'focusin')).toBe(true);
+		const overFns = (document as any)._listeners['pointerover'];
+		const overFn = overFns[overFns.length - 1];
+		const headScripts = (document.head as any).children.filter((c: any) => c.tagName === 'SCRIPT');
+		overFn({ target: { nodeType: 1, closest: () => ({ getAttribute: (k) => (k === 'href' ? '/docs' : null) }) } });
+		await tick(5);
+		const scriptsAfter = (document.head as any).children.filter((c: any) => c.tagName === 'SCRIPT');
+		expect(scriptsAfter.length).toBe(headScripts.length + 1);
+		// chunk warming must not fetch route data
+		expect(router._prefetched).toBeFalsy();
+	} finally {
+		globalThis.fetch = origFetch;
+	}
+});
+
+testAsync('hover warmup appends one chunk script per unique link', async () => {
+	const container = document.createElement('div');
+	const origFetch = globalThis.fetch;
+	globalThis.fetch = async () => mockFetchResponse({ props: {}, head: '' });
+	const mark = (globalThis._mark = (globalThis._mark || 0) + 1);
+	try {
+		const tree = buildRouteTree([
+			{ path: '/', page: () => null },
+			{ path: '/team', page: (props) => document.createTextNode('Team') },
+			{ path: '/admin', page: (props) => document.createTextNode('Admin') },
+		]);
+		tree[1]._chunk = `/_vesk/static/page-team-${mark}.js`;
+		tree[2]._chunk = `/_vesk/static/page-admin-${mark}.js`;
+		const router = createFileRouter(tree, { container });
+		router.start();
+		const overFns = (document as any)._listeners['pointerover'];
+		const overFn = overFns[overFns.length - 1];
+		const fakeFor = (href: string) => ({ nodeType: 1, closest: () => ({ getAttribute: (k) => (k === 'href' ? href : null) }) });
+		const scripts = () => (document.head as any).children.filter((c: any) => c.tagName === 'SCRIPT');
+		// Hover over a nested child node of the link (bubbling) warms its chunk.
+		overFn({ target: fakeFor('/team') });
+		// Keyboarding to a link routes through the focusin listener.
+		const focusFns = (document as any)._listeners['focusin'];
+		focusFns[focusFns.length - 1]({ target: fakeFor('/admin') });
+		await tick(5);
+		const urls = scripts().map((s: any) => s.src ? s.src : '');
+		expect(urls.some((u: string) => u.includes('page-team'))).toBe(true);
+		expect(urls.some((u: string) => u.includes('page-admin'))).toBe(true);
+		expect(router._prefetched).toBeFalsy();
+		// Repeated hover of same link does not append a second script.
+		overFn({ target: fakeFor('/team') });
+		await tick(5);
+		expect(scripts().filter((s: any) => s.src && s.src.includes('page-team')).length).toBe(1);
 	} finally {
 		globalThis.fetch = origFetch;
 	}
