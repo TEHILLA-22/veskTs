@@ -440,6 +440,55 @@ it('setSsrData mirrors into globalThis even when a sink is registered (fork-safe
   }
 });
 
+it('re-emits stale global mirror data into the CURRENT render so the handoff keeps the ssr-data script', async () => {
+  // Regression: the dev server keeps `__vsk_ssr_data` warm across requests
+  // (the flat channel is never cleared between renders). On request two, a
+  // useFetch hits that stale global mirror and settles without re-writing the
+  // per-request sink — which left the next render's snapshot() empty and the
+  // page without its `/_vesk/ssr-data.js` script.
+  cleanupGlobals();
+  let requestOneWrites: Array<[string, unknown]> = [];
+  const sinkA: SsrDataSink = {
+    set: (k, v) => { requestOneWrites.push([k, v]); },
+    get: () => undefined,
+    snapshot: () => Object.fromEntries(requestOneWrites),
+    clear: () => { requestOneWrites = []; },
+  };
+  setSsrSink(sinkA);
+  try {
+    (globalThis as any).__vsk_ssr = true;
+    // Request one: data lands in the request-one sink + the flat global mirror.
+    (globalThis as any).__vsk_ssr_token = 'req-1';
+    setSsrData('/api/posts', { id: 1, name: 'Alice' });
+    expect(requestOneWrites.length).toBe(1);
+    expect((globalThis as any).__vsk_ssr_data['/api/posts']).toEqual({ id: 1, name: 'Alice' });
+
+    // Request two: fresh sink (empty), same stale flat mirror. No fetch should
+    // fire — the resource settles from the shared mirror — but the hit MUST be
+    // re-emitted into the request-two sink so buildDataScripts finds it.
+    let requestTwoWrites: Array<[string, unknown]> = [];
+    const sinkB: SsrDataSink = {
+      set: (k, v) => { requestTwoWrites.push([k, v]); },
+      get: () => undefined,
+      snapshot: () => Object.fromEntries(requestTwoWrites),
+      clear: () => { requestTwoWrites = []; },
+    };
+    setSsrSink(sinkB);
+    (globalThis as any).__vsk_ssr_token = 'req-2';
+    const mock = mockFetch(() => jsonResponse({ shouldNotRun: true }));
+    const res = useFetch('/api/posts');
+    expect(mock.calls.length).toBe(0);
+    expect(res.loading).toBe(false);
+    expect(res.data).toEqual({ id: 1, name: 'Alice' });
+    expect(requestTwoWrites.some(([k]) => k === '/api/posts')).toBe(true);
+    expect(requestTwoWrites[0]).toEqual(['/api/posts', { id: 1, name: 'Alice' }]);
+    mock.restore();
+  } finally {
+    setSsrSink(null);
+    cleanupGlobals();
+  }
+});
+
 it('routes SSR fetches through the __vesk_ssr_fetch hook, not global fetch', async () => {
   cleanupGlobals();
   (globalThis as any).__vsk_ssr = true;

@@ -652,6 +652,12 @@ export function createResource<T>(
 
 	const ssrData = getSsrData(resourceKey);
 	if (ssrData !== undefined) {
+		// The hit may come from the flat globalThis store a PREVIOUS request left
+		// behind (dev-server keeps it warm across requests). The handoff for THIS
+		// render is a different channel (per-request sink / per-token slot), so
+		// re-emit the value into the current render — otherwise snapshot() comes
+		// back empty and the page ships without its ssr-data script.
+		if (isServer()) setSsrData(resourceKey, ssrData);
 		settle(handle, ssrData as T);
 		writeCache(resourceKey, ssrData);
 		return accessor;

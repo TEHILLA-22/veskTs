@@ -213,16 +213,25 @@ function opaqueRegionToJS(node: OpaqueDynamicRegion, isAsync = false, tracked?: 
   const lines: string[] = [];
   const cond = exprJSX(node.condition, tracked);
   lines.push(`if (${cond}) {`);
+  // Static branch content still needs server claim markers: the client
+  // re-branches an if/else-if region on every tracked change (OpaqueDynamicRegion
+  // claimStatic codegen), so opposed to plain component bodies it must be able
+  // to adopt the SSR nodes in place — not leave them orphaned next to the
+  // region's anchors. Mirrors mapRegionToJS' alternate handling below.
+  setVskForceClaim(true);
   for (const n of node.consequentNodes) {
     const code = irNodeToJS(n, null, isAsync, tracked);
     if (code) lines.push(indent(code));
   }
+  setVskForceClaim(false);
   if (node.alternateNodes.length > 0) {
     lines.push(`} else {`);
+    setVskForceClaim(true);
     for (const n of node.alternateNodes) {
       const code = irNodeToJS(n, null, isAsync, tracked);
       if (code) lines.push(indent(code));
     }
+    setVskForceClaim(false);
   }
   lines.push(`}`);
   return lines.join('\n');

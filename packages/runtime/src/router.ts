@@ -7,6 +7,7 @@ import type { RouteNode, RouteMatch } from '@vesk/runtime/src/router-match';
 import {
 	__isHydrating, setIsHydrating, _state, _scrollPositions,
 	_isPopStateNavigation, setIsPopStateNavigation, setCurrentRouter,
+	captureInitialScroll,
 	showLoadingInContainer, handleScroll, applyHead, findLoadingComponent,
 	findErrorComponent, findNotFoundComponent, findOfflineComponent,
 	findNetworkComponent, RouterCtx, getCurrentRouter,
@@ -34,7 +35,7 @@ interface RouterInstance {
 	_currentSegments: { rendered: Node }[] | null;
 	_depth: number;
 	start(): RouterInstance;
-	navigate(path: string, opts?: { replace?: boolean }): Promise<void> | void;
+	navigate(path: string, opts?: { replace?: boolean; scrollBehavior?: 'auto' | 'instant' | 'smooth' }): Promise<void> | void;
 	prefetch(path: string): void;
 	readonly currentPath: string;
 	/** True while an SPA navigation is in flight (shared with LoadingIndicator). */
@@ -1366,6 +1367,7 @@ export function createRouter(
 			setCurrentRouter(this);
 
 			if (typeof window !== 'undefined' && 'scrollRestoration' in window.history) {
+				captureInitialScroll();
 				window.history.scrollRestoration = 'manual';
 			}
 			if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
@@ -1507,7 +1509,7 @@ export function createRouter(
 					}
 					this._currentMatch = match!;
 					clearOfflineFlag(this, container);
-					handleScroll(url.pathname, opts.replace);
+					handleScroll(url.pathname, opts.replace, opts.scrollBehavior);
 				};
 
 				const swapView = (fn: () => void | Promise<void>) => {
@@ -1720,6 +1722,7 @@ export function createFileRouter(routeTree: RouteNode[], options: FileRouterOpti
 			setCurrentRouter(this);
 
 			if (typeof window !== 'undefined' && 'scrollRestoration' in window.history) {
+				captureInitialScroll();
 				window.history.scrollRestoration = 'manual';
 			}
 			if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
@@ -1875,9 +1878,9 @@ export function createFileRouter(routeTree: RouteNode[], options: FileRouterOpti
 						firstRenderFailed = true;
 						throw e;
 					}
-					router._currentMatch = match!;
-					clearOfflineFlag(router, container);
-					handleScroll(url.pathname, opts.replace);
+				router._currentMatch = match!;
+				clearOfflineFlag(router, container);
+				handleScroll(url.pathname, opts.replace, opts.scrollBehavior);
 				};
 
 				const doRender = () => {

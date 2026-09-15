@@ -1,0 +1,17 @@
+export component Page {
+	const &[target] = track("ssr")
+
+	<section class="elif-chain" data-test="elif">
+		<h1>Else-if chain hydration</h1>
+		<button type="button" id="elif-ssr" onClick={() => { target = "ssr" }}>ssr</button>
+		<button type="button" id="elif-web" onClick={() => { target = "web" }}>web</button>
+		<button type="button" id="elif-native" onClick={() => { target = "native" }}>native</button>
+		if (target === "ssr") {
+			<pre id="elif-out">SSR</pre>
+		} else if (target === "web") {
+			<pre id="elif-out">WEB</pre>
+		} else if (target === "native") {
+			<pre id="elif-out">NATIVE</pre>
+		}
+	</section>
+}

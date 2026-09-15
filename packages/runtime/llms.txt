@@ -124,7 +124,7 @@ ensureChunk(chunkUrl: string): Promise<void>
 Outlet(props?: { children?: unknown }): Node
 Link(props: LinkProps, registry?: Map<string, unknown>, hydrate?: HydrateWalker): Node | string
 NavLink(props: NavLinkProps, registry?: Map<string, unknown>, hydrate?: HydrateWalker): Node | string
-useNavigate(): (path: string, opts?: { replace?: boolean }) => void
+useNavigate(): (path: string, opts?: { replace?: boolean; scrollBehavior?: 'auto' | 'instant' | 'smooth' }) => void
 useParams(): Record<string, string>
 usePathname(): string
 useSearchParams(): [URLSearchParams, (next: Record<string, string> | string) => void]
@@ -138,7 +138,11 @@ matchRoute(tree: RouteNode[], pathname: string): RouteMatch | null   // from rou
 RouterOptions: { container?: HTMLElement; prefetch?: boolean; hydrate?: 'full' | 'viewport' | 'idle' | 'interaction'; [k: string]: unknown }
 ```
 `NavLinkProps extends LinkProps { activeClass?: string; ariaCurrent?: boolean | string }`
-`LinkProps: { href: string; children?: unknown; class?: string; style?: string; target?: string; rel?: string; [k: string]: unknown }`
+`LinkProps: { href: string; children?: unknown; class?: string; style?: string; target?: string; rel?: string; scrollBehavior?: 'auto' | 'instant' | 'smooth'; [k: string]: unknown }`
+The `scrollBehavior` prop (Link & NavLink) controls the window-scroll behavior used
+when the link navigates (`smooth` eases to the destination, `auto` jumps
+immediately; default `auto`). A refresh restores the viewport the browser had
+scrolled to instead of forcing the top.
 
 ### 1e. From `bindings.ts` (client-only)
 ```ts

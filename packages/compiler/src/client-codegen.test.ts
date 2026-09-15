@@ -1268,6 +1268,115 @@ describe('Client Codegen — While / Do-While / For / Switch Blocks', () => {
 		try { new Function('track, effect', stripModuleWrapper(code)); } catch (e) { throw new Error(`Syntax error: ${e.message}\n\n${code}`); }
 	});
 
+	// An `if / else-if / else-if` chain is collapsed into one region in hydrate
+	// mode. Independent `if` blocks that render in the same slot were rewritten
+	// to a chain by the user; the region's `branchInit` must cover EVERY branch
+	// index (not just the first two) so switching the tracked condition renders
+	// the matching branch — previously indices >= 2 fell to `-1` and the branch
+	// content vanished from the DOM.
+	// The mount-time `__first` effect guard must ALSO read the branch init on its
+	// first run so the region subscribes to the tracked condition; returning
+	// before any tracked read leaves the effect dependency-less and it never
+	// re-renders on a subsequent change (same rule as single `if/else`).
+	bothModes('if / else-if / else-if chain dispatches every branch index', `
+		component App {
+			let &[target] = track("ssr")
+			if (target === "ssr") {
+				<p>ssr</p>
+			} else if (target === "web") {
+				<p>web</p>
+			} else if (target === "native") {
+				<p>native</p>
+			}
+		}
+	`, (code, mode) => {
+		try { new Function('track, effect', stripModuleWrapper(code)); } catch (e) { throw new Error(`Syntax error: ${e.message}\n\n${code}`); }
+		if (mode === 'hydrate') {
+			expect(code).toContain('(get(target) === "ssr" ? 0 : (get(target) === "web" ? 1 : (get(target) === "native" ? 2 : -1)))');
+			expect(code).toContain('else if (__new === 1)');
+			expect(code).toContain('else if (__new === 2)');
+			expect(code).not.toContain('else if (__new === 3)');
+			expect(code).toContain('if (__first) { __first = false; __iv = ((get(target) === "ssr" ? 0 : (get(target) === "web" ? 1 : (get(target) === "native" ? 2 : -1))));');
+		} else {
+			// normal mode: nested regions — the innermost else-if still dispatches.
+			expect(code).toContain('if (get(target) === "native") { ');
+		}
+	});
+
+	bothModes('if / else-if with final else binds the final branch index', `
+		component App {
+			let &[mode] = track(0)
+			if (mode === 0) {
+				<p>zero</p>
+			} else if (mode === 1) {
+				<p>one</p>
+			} else {
+				<p>other</p>
+			}
+		}
+	`, (code, mode) => {
+		try { new Function('track, effect', stripModuleWrapper(code)); } catch (e) { throw new Error(`Syntax error: ${e.message}\n\n${code}`); }
+		if (mode === 'hydrate') {
+			// final `else` renders when no condition matches — index == chain.length
+			expect(code).toContain('(get(mode) === 0 ? 0 : (get(mode) === 1 ? 1 : 2))');
+			expect(code).toContain('if (__first) { __first = false; __iv = ((get(mode) === 0 ? 0 : (get(mode) === 1 ? 1 : 2)));');
+		}
+	});
+
+	bothModes('fully-static else-if branches each claim SSR content in hydrate mode', `
+		component App {
+			let &[target] = track("ssr")
+			if (target === "ssr") {
+				<p id="out">SSR</p>
+			} else if (target === "web") {
+				<p id="out">WEB</p>
+			} else if (target === "native") {
+				<p id="out">NATIVE</p>
+			}
+		}
+	`, (code, mode) => {
+		try { new Function('track, effect', stripModuleWrapper(code)); } catch (e) { throw new Error(`Syntax error: ${e.message}\n\n${code}`); }
+		if (mode === 'hydrate') {
+			// every branch must adopt the server-rendered element (claimStatic),
+			// so a switch away from the initially-rendered branch rebuilds it in place.
+			expect(
+				code.match(/__hydrate\.nextElement\("p"\)/g)?.length ?? 0
+			).toBe(3);
+			expect(code).toContain('createTextNode("WEB")');
+			expect(code).toContain('createTextNode("NATIVE")');
+		} else {
+			// normal mode builds fresh elements — one per branch.
+			expect(
+				code.match(/document\.createElement\("p"\)/g)?.length ?? 0
+			).toBe(3);
+		}
+	});
+
+	bothModes('fully-static plain if/else branch claims SSR content in hydrate mode', `
+		component App {
+			let &[mode] = track(0)
+			if (mode === 0) {
+				<p id="out">OFF</p>
+			} else {
+				<span class="pill">ON</span>
+				<p id="out">ON</p>
+			}
+		}
+	`, (code, mode) => {
+		try { new Function('track, effect', stripModuleWrapper(code)); } catch (e) { throw new Error(`Syntax error: ${e.message}\n\n${code}`); }
+		if (mode === 'hydrate') {
+			// both roots of the multi-root alternate claim their own subtree.
+			expect(
+				code.match(/__hydrate\.nextElement\("p"\)/g)?.length ?? 0
+			).toBe(2);
+			expect(code).toContain('__hydrate.nextElement("span")');
+			expect(code).toContain('createTextNode("ON")');
+		} else {
+			expect(code).toContain('document.createElement("span")');
+			expect(code).toContain('document.createElement("p")');
+		}
+	});
+
 	bothModes('switch block emits case rendering', `
 		component App() {
 			const score = 7;

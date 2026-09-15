@@ -535,6 +535,20 @@ describe('Statement Mode Server Rendering', () => {
 		expect(html.includes('<!--vsk-->')).toBe(false);
 		expect(html.includes('data-vsk-key')).toBe(false);
 	});
+	it('hydrate SSR stamps claim markers on fully-static else-if branches so the client can rebranch in place', () => {
+		const html = render(`
+			component App() {
+				let &[target] = track("ssr")
+				if (target === "ssr") {
+					<p>SSR</p>
+				} else if (target === "web") {
+					<p>WEB</p>
+				}
+			}
+		`, 'App', {}, new Map(), { hydrate: true });
+		// the initially-rendered static branch is claimable, not a bare element
+		expect(html).toBe('<!--vsk--><p>SSR</p>');
+	});
 	it('renders empty block for empty list', () => {
 		const html = render(`
 			component App(props: { todos: { id: number, text: string }[] }) {

@@ -830,7 +830,10 @@ function emitOpaque(ctx: Ctx, node: OpaqueDynamicRegion, tracked: Map<string, Tr
       const cl = ctx.n();
       ctx.push(indent(`const ${cl} = [];`));
       for (const n of chain[i].nodes) {
+        const savedClaim = ctx.claimStatic;
+        if (hyd) ctx.claimStatic = true;
         const v = emitNode(ctx, n, tracked, effectsVar, parentVar);
+        ctx.claimStatic = savedClaim;
         if (v) ctx.push(indent(`${cl}.push(${v});`));
       }
       ctx.push(indent(`__place(${anchor}, ${endAnchor}, ${cl}, ${parent});`));
@@ -843,7 +846,10 @@ function emitOpaque(ctx: Ctx, node: OpaqueDynamicRegion, tracked: Map<string, Tr
       const cl2 = ctx.n();
       ctx.push(indent(`const ${cl2} = [];`));
       for (const n of finalElse) {
+        const savedClaim = ctx.claimStatic;
+        if (hyd) ctx.claimStatic = true;
         const v = emitNode(ctx, n, tracked, effectsVar, parentVar);
+        ctx.claimStatic = savedClaim;
         if (v) ctx.push(indent(`${cl2}.push(${v});`));
       }
       ctx.push(indent(`__place(${anchor}, ${endAnchor}, ${cl2}, ${parent});`));
@@ -853,16 +859,20 @@ function emitOpaque(ctx: Ctx, node: OpaqueDynamicRegion, tracked: Map<string, Tr
     for (let i = 1; i < chain.length; i++) init += ` else if (${chain[i].cond}) { ${asyncKw}${renderNames[i]}(); }`;
     if (finalRender) init += ` else { ${asyncKw}${finalRender}(); }`;
     ctx.push(init);
-    let branchInit: string;
-    if (chain.length === 1 && finalRender) branchInit = `(${chain[0].cond} ? 0 : 1)`;
-    else if (chain.length === 2 && finalRender) branchInit = `(${chain[0].cond} ? 0 : (${chain[1].cond} ? 1 : 2))`;
-    else if (chain.length === 2 && !finalRender) branchInit = `(${chain[0].cond} ? 0 : (${chain[1].cond} ? 1 : -1))`;
-    else branchInit = `(${chain[0].cond} ? 0 : -1)`;
+    // Resolve which branch index the chain is in, for any chain depth. The last
+    // fallback is `chain.length` when a final `else` exists, otherwise -1 (no
+    // branch renders). Build the nested ternary from the innermost condition
+    // outwards so every else-if participates.
+    let branchInitFallback = finalRender ? `${chain.length}` : '-1';
+    for (let i = chain.length - 1; i >= 0; i--) {
+      branchInitFallback = `(${chain[i].cond} ? ${i} : ${branchInitFallback})`;
+    }
+    const branchInit = `(${branchInitFallback})`;
     let effInner = `if (__new === 0) { ${asyncKw}${renderNames[0]}(); }`;
     for (let i = 1; i < chain.length; i++) effInner += ` else if (__new === ${i}) { ${asyncKw}${renderNames[i]}(); }`;
     if (finalRender) effInner += ` else { ${asyncKw}${finalRender}(); }`;
     const effBody = `effect(${ctx.isAsyncScope ? 'async () => {' : '() => {'}
-        if (__first) { __first = false; return; }
+        if (__first) { __first = false; __iv = ${branchInit}; return; }
         const __new = ${branchInit};
         if (__new !== __iv) {
           for (const e of ${effectsVar}) destroy_block(e);
@@ -908,7 +918,10 @@ function emitOpaque(ctx: Ctx, node: OpaqueDynamicRegion, tracked: Map<string, Tr
   if (!hyd) ctx.push(indent(`const ${conFrag} = document.createDocumentFragment();`));
   if (hyd) ctx.push(indent(`const __cl = [];`));
   for (const n of node.consequentNodes) {
+    const savedClaim = ctx.claimStatic;
+    if (hyd) ctx.claimStatic = true;
     const v = emitNode(ctx, n, tracked, effectsVar, hyd ? parentVar : conFrag);
+    ctx.claimStatic = savedClaim;
     if (v) {
       if (hyd) ctx.push(indent(`__cl.push(${v});`));
       else ctx.push(indent(`${conFrag}.appendChild(${v});`));
@@ -927,7 +940,10 @@ function emitOpaque(ctx: Ctx, node: OpaqueDynamicRegion, tracked: Map<string, Tr
     if (!hyd) ctx.push(indent(`const ${altFrag} = document.createDocumentFragment();`));
     if (hyd) ctx.push(indent(`const __cl = [];`));
     for (const n of node.alternateNodes) {
+      const savedAltClaim = ctx.claimStatic;
+      if (hyd) ctx.claimStatic = true;
       const v = emitNode(ctx, n, tracked, effectsVar, hyd ? parentVar : altFrag);
+      ctx.claimStatic = savedAltClaim;
       if (v) {
         if (hyd) ctx.push(indent(`__cl.push(${v});`));
         else ctx.push(indent(`${altFrag}.appendChild(${v});`));

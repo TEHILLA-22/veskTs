@@ -106,6 +106,20 @@ let failed = 0;
 let skipped = 0;
 let browser;
 
+// Poll `read()` (returns a promise of a snapshot) until `ok(snapshot)` is true
+// or `timeoutMs` elapses. Returns the last snapshot (or null on timeout).
+async function pollUntil(read, timeoutMs, ok) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await read();
+    if (last !== null && ok(last)) return last;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  last = await read().catch(() => null);
+  return last !== null && ok(last) ? last : null;
+}
+
 async function assert(condition, msg) {
   if (condition) { passed++; console.log(`  \u2713 ${msg}`); }
   else { failed++; console.log(`  \u2717 ${msg}`); }
@@ -1691,6 +1705,69 @@ async function main() {
       assert(s.count === 3 && JSON.stringify(s.values) === JSON.stringify(['10', '20', '30']),
         'reload: 3 fresh-rendered chips 10,20,30 (got ' + s.count + ': ' + s.values.join(',') + ')');
       assert(s.leftMarkers === 0, 'reload claims all hydration markers (got vsk=' + s.leftMarkers + ')');
+      assert(errors.length === 0, 'reload zero pageerrors (got ' + errors.length + ': ' + errors.join(', ') + ')');
+    }
+    await page.close();
+  }
+
+  // ── Test 23: else-if chain switches branches on hydrated client ──
+  // Regression: hydrate-mode `if / else-if / else-if` chains were collapsed into
+  // one region whose `branchInit` covered only the first two branch indices
+  // (later branches landed on `-1` and their content vanished on switch), and
+  // whose mount-time effect returned before reading the condition — so the
+  // region subscribed to nothing and never re-rendered on a tracked change.
+  {
+    console.log('\n=== TEST 23: else-if chain switches branches after hydration ===');
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', err => errors.push(err.message));
+
+    const read = () => page.evaluate(() => {
+      const pre = document.querySelector('#elif-out');
+      return pre ? { text: pre.textContent.trim(), count: document.querySelectorAll('#elif-out').length } : null;
+    });
+
+    console.log('  23a: full load — SSR chain rendered initial branch via claim');
+    await goto(page, BASE + '/elif', { waitUntil: 'networkidle0', timeout: 15000 });
+    {
+      const s = await read();
+      assert(!!s, '/elif: chain output element exists');
+      if (s) assert(s.text === 'SSR' && s.count === 1, 'initial branch SSR rendered exactly once (got ' + JSON.stringify(s) + ')');
+      assert(errors.length === 0, '/elif full load zero pageerrors (got ' + errors.length + ': ' + errors.join(', ') + ')');
+    }
+
+    console.log('  23b: click web — later chain branch replaces claimed SSR content');
+    await waitForHydration(page);
+    await new Promise(r => setTimeout(r, 250));
+    await clickEl(page, '#elif-web');
+    {
+      const s = await pollUntil(read, 5000, r => r && r.text === 'WEB');
+      assert(s, 'after web: WEB rendered (got ' + JSON.stringify(s) + ')');
+      assert(s && s.count === 1, 'after web: chain output exists exactly once (got count ' + (s && s.count) + ')');
+    }
+
+    console.log('  23c: click native — third branch swaps in (old chain missed index >= 2)');
+    await clickEl(page, '#elif-native');
+    {
+      const s = await pollUntil(read, 5000, r => r && r.text === 'NATIVE');
+      assert(s, 'after native: NATIVE rendered (got ' + JSON.stringify(s) + ')');
+      assert(s && s.count === 1, 'after native: chain output exists exactly once (got count ' + (s && s.count) + ')');
+    }
+
+    console.log('  23d: back to ssr — first branch re-renders cleanly');
+    await clickEl(page, '#elif-ssr');
+    {
+      const s = await pollUntil(read, 5000, r => r && r.text === 'SSR');
+      assert(s, 'back to ssr: SSR rendered (got ' + JSON.stringify(s) + ')');
+      assert(s && s.count === 1, 'back to ssr: chain output exists exactly once (got count ' + (s && s.count) + ')');
+      assert(errors.length === 0, 'chain switching zero pageerrors (got ' + errors.length + ': ' + errors.join(', ') + ')');
+    }
+
+    console.log('  23e: hard reload — chain claims again');
+    await page.reload({ waitUntil: 'networkidle0' });
+    {
+      const s = await read();
+      assert(!!s && s.text === 'SSR' && s.count === 1, 'reload: SSR claimed exactly once (got ' + JSON.stringify(s) + ')');
       assert(errors.length === 0, 'reload zero pageerrors (got ' + errors.length + ': ' + errors.join(', ') + ')');
     }
     await page.close();

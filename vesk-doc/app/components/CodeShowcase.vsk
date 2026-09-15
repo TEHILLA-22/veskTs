@@ -112,11 +112,9 @@ export component CodeShowcase {
 						</div>
 						if (target === "ssr") {
 							<pre class="min-w-0 max-w-full overflow-x-auto px-4 py-4 font-mono text-[11.5px] leading-[1.75] text-foreground/70 sm:text-[12.5px]"><code>{ssrOutput}</code></pre>
-						}
-            if (target === "web") {
+						} else if (target === "web") {
 							<pre class="min-w-0 max-w-full overflow-x-auto px-4 py-4 font-mono text-[11.5px] leading-[1.75] text-foreground/70 sm:text-[12.5px]"><code>{webOutput}</code></pre>
-						} 
-            if (target === "native"){
+						} else if (target === "native") {
 							<pre class="min-w-0 max-w-full overflow-x-auto px-4 py-4 font-mono text-[11.5px] leading-[1.75] text-foreground/70 sm:text-[12.5px]"><code>{nativeOutput}</code></pre>
 						}
 						<div class="flex min-w-0 items-center gap-3 border-t border-border px-3 py-2 font-mono text-[10px] text-muted-foreground">

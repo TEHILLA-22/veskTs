@@ -3,9 +3,14 @@ import { createContext } from '@vesk/runtime/src/context';
 import { createHydrateWalker } from '@vesk/runtime/src/hydrate';
 import { isLoadingActive, getLoadingState } from '@vesk/runtime/src/loading-indicator';
 
+/** Navigation scroll behavior: how the router moves the window when
+ * navigating. Passed through `<Link scrollBehavior="smooth">` /
+ * `<NavLink scrollBehavior="smooth">` and honored by `window.scrollTo`. */
+export type ScrollBehavior = 'auto' | 'instant' | 'smooth';
+
 interface Router {
 	start(): Router;
-	navigate(path: string, opts?: { replace?: boolean }): void;
+	navigate(path: string, opts?: { replace?: boolean; scrollBehavior?: ScrollBehavior }): void;
 	prefetch(path: string): void;
 	readonly currentPath: string;
 	_outletPlaceholders?: HTMLElement[];
@@ -85,6 +90,18 @@ export const _state = {
 
 export const _scrollPositions = new Map<string, number>();
 export let _isPopStateNavigation = false;
+export let _initialScrollRestored = false;
+export let _initialSavedScroll = 0;
+
+/** Capture the browser's pre-hydration scroll position and re-arm the
+ * one-shot initial restore. Called at the top of `router.start()` on a
+ * fresh page load so a refresh lands back on the viewport the browser
+ * had scrolled to instead of the top. */
+export function captureInitialScroll(): void {
+	if (typeof window === 'undefined') return;
+	_initialSavedScroll = window.scrollY || 0;
+	_initialScrollRestored = false;
+}
 
 export function setIsPopStateNavigation(v: boolean): void {
 	_isPopStateNavigation = v;
@@ -162,16 +179,22 @@ export function showLoadingInContainer(container: HTMLElement, loadingFn: Functi
 	}
 }
 
-export function handleScroll(pathname: string, isReplace?: boolean): void {
+export function handleScroll(pathname: string, isReplace?: boolean, scrollBehavior?: ScrollBehavior): void {
 	if (typeof window === 'undefined' || typeof window.scrollTo !== 'function') return;
+	const behavior = scrollBehavior === 'smooth' || scrollBehavior === 'instant' ? scrollBehavior : 'auto';
 	if (_isPopStateNavigation) {
 		setIsPopStateNavigation(false);
 		const savedY = _scrollPositions.get(pathname);
 		requestAnimationFrame(() => {
-			window.scrollTo(0, savedY !== undefined ? savedY : 0);
+			window.scrollTo({ top: savedY !== undefined ? savedY : 0, behavior });
+		});
+	} else if (isReplace && !_initialScrollRestored) {
+		_initialScrollRestored = true;
+		requestAnimationFrame(() => {
+			window.scrollTo({ top: _initialSavedScroll, behavior });
 		});
 	} else if (!isReplace) {
-		requestAnimationFrame(() => window.scrollTo(0, 0));
+		requestAnimationFrame(() => window.scrollTo({ top: 0, behavior }));
 	}
 }
 
@@ -239,6 +262,8 @@ interface LinkProps {
 	style?: string;
 	target?: string;
 	rel?: string;
+	/** Scroll behavior used when this link navigates (`auto` | `instant` | `smooth`). */
+	scrollBehavior?: ScrollBehavior;
 	[k: string]: unknown;
 }
 
@@ -290,7 +315,7 @@ export function Link(
 			e.preventDefault();
 			e.stopPropagation();
 			const nav = useNavigate();
-			nav(href);
+			nav(href, { scrollBehavior: props.scrollBehavior });
 		});
 		return claimed ? document.createDocumentFragment() : a;
 	}
@@ -328,7 +353,7 @@ export function Link(
 		e.preventDefault();
 		e.stopPropagation();
 		const nav = useNavigate();
-		nav(href);
+		nav(href, { scrollBehavior: props.scrollBehavior });
 	});
 	return a;
 }
@@ -384,7 +409,7 @@ export function NavLink(
 			e.preventDefault();
 			e.stopPropagation();
 			const nav = useNavigate();
-			nav(props.href);
+			nav(props.href, { scrollBehavior: props.scrollBehavior });
 		});
 		const path = usePathname();
 		const routeHref = routeHrefOf(props.href);
@@ -414,7 +439,7 @@ export function NavLink(
 				e.preventDefault();
 				e.stopPropagation();
 				const nav = useNavigate();
-				nav(props.href);
+				nav(props.href, { scrollBehavior: props.scrollBehavior });
 			});
 			const path = usePathname();
 			const routeHref = routeHrefOf(props.href);
@@ -438,9 +463,9 @@ export function NavLink(
 	return a;
 }
 
-export function useNavigate(): (path: string, opts?: { replace?: boolean }) => void {
+export function useNavigate(): (path: string, opts?: { replace?: boolean; scrollBehavior?: ScrollBehavior }) => void {
 	const router = RouterCtx.get() || _currentRouter;
-	return (path: string, opts = {}) => {
+	return (path: string, opts: { replace?: boolean; scrollBehavior?: ScrollBehavior } = {}) => {
 		if (router && router.navigate) {
 			router.navigate(path, opts);
 		} else {

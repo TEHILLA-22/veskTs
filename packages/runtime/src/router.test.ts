@@ -216,7 +216,12 @@ function setupMockDom() {
 	global.window = {
 		location: { pathname: '/', search: '', hash: '', href: 'http://localhost/', origin: 'http://localhost' },
 		scrollY: 0,
-		scrollTo(x, y) { this.scrollY = y; },
+		_scrollCalls: [],
+		scrollTo(x, y) {
+			const opts = typeof x === 'object' && x !== null ? x : (typeof y === 'number' ? { top: y } : { top: 0 });
+			this.scrollY = typeof opts.top === 'number' ? opts.top : 0;
+			this._scrollCalls.push({ top: this.scrollY, behavior: opts.behavior || 'auto' });
+		},
 		requestAnimationFrame(fn) { _rAFQueue.push(fn); },
 		flushRAF() { const q = _rAFQueue; _rAFQueue = []; for (const fn of q) fn(); },
 		history: {
@@ -821,6 +826,93 @@ test('NavLink has active class when path matches', () => {
 test('NavLink does not have active class when path does not match', () => {
 	const a = NavLink({ href: '/other' });
 	expect(a.classList.contains('active')).toBe(false);
+});
+
+test('Link scrollBehavior prop forwards the scroll behavior on navigate', () => {
+	const container = document.createElement('div');
+	const tree = buildRouteTree([
+		{ path: '/', page: () => document.createTextNode('Home') },
+		{ path: '/about', page: () => document.createTextNode('About') },
+	]);
+	const router = createFileRouter(tree, { container });
+	router.start();
+	window._scrollCalls = [];
+	const a = Link({ href: '/about', scrollBehavior: 'smooth', children: 'About' });
+	a._listeners.click[0]({ metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, button: 0, preventDefault() {}, stopPropagation() {} });
+	const last = window._scrollCalls[window._scrollCalls.length - 1];
+	expect(last.behavior).toBe('smooth');
+	expect(last.top).toBe(0);
+});
+
+test('NavLink scrollBehavior prop forwards the scroll behavior on navigate', () => {
+	const container = document.createElement('div');
+	const tree = buildRouteTree([
+		{ path: '/', page: () => document.createTextNode('Home') },
+		{ path: '/about', page: () => document.createTextNode('About') },
+	]);
+	const router = createFileRouter(tree, { container });
+	router.start();
+	window._scrollCalls = [];
+	const a = NavLink({ href: '/about', scrollBehavior: 'smooth', children: 'About' });
+	a._listeners.click[a._listeners.click.length - 1]({ metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, button: 0, preventDefault() {}, stopPropagation() {} });
+	const last = window._scrollCalls[window._scrollCalls.length - 1];
+	expect(last.behavior).toBe('smooth');
+	expect(last.top).toBe(0);
+});
+
+test('Link without scrollBehavior defaults to auto scroll behavior', () => {
+	const container = document.createElement('div');
+	const tree = buildRouteTree([
+		{ path: '/', page: () => document.createTextNode('Home') },
+		{ path: '/about', page: () => document.createTextNode('About') },
+	]);
+	const router = createFileRouter(tree, { container });
+	router.start();
+	window._scrollCalls = [];
+	const a = Link({ href: '/about', children: 'About' });
+	a._listeners.click[0]({ metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, button: 0, preventDefault() {}, stopPropagation() {} });
+	const last = window._scrollCalls[window._scrollCalls.length - 1];
+	expect(last.behavior).toBe('auto');
+	expect(last.top).toBe(0);
+});
+
+test('Link SSR does not emit the scrollBehavior prop as an attribute', () => {
+	const saved = globalThis.document;
+	try {
+		delete globalThis.document;
+		const out = Link({ href: '/docs/x', scrollBehavior: 'smooth', children: 'go' });
+		expect(out).toBe('<!--vsk--><a href="/docs/x">go</a>');
+	} finally {
+		globalThis.document = saved;
+	}
+});
+
+test('start() restores the browser-scrolled position on refresh (createFileRouter)', () => {
+	const container = document.createElement('div');
+	const tree = buildRouteTree([{ path: '/', page: () => document.createTextNode('Home') }]);
+	window.scrollY = 540; // browser restored this before hydration
+	try {
+		const router = createFileRouter(tree, { container });
+		router.start();
+		expect(window.scrollY).toBe(540);
+	} finally {
+		window.scrollY = 0;
+		window._scrollCalls = [];
+	}
+});
+
+test('start() restores the browser-scrolled position on refresh (createRouter)', () => {
+	const container = document.createElement('div');
+	const routes = defineRoute({ path: '/', page: () => document.createTextNode('Home') });
+	window.scrollY = 320; // browser restored this before hydration
+	try {
+		const router = createRouter(routes, { container });
+		router.start();
+		expect(window.scrollY).toBe(320);
+	} finally {
+		window.scrollY = 0;
+		window._scrollCalls = [];
+	}
 });
 
 test('createFileRouter installs delegated click listener for [no-reload] anchors', () => {	const container = document.createElement('div');
