@@ -251,42 +251,60 @@ export function generateSsrFunction(
 
   let dataCode: string;
   const exposeErr = "process.env.NODE_ENV !== 'production'";
+  // SPA data-nav renders page + layouts through renderPage and never runs
+  // renderFullPage/renderPageStream, whose finally blocks own the per-request
+  // token/slot cleanup in the full-page path. Clear the handoff globals here so
+  // the next full-page render can't reuse the stale token and serialize the
+  // previous nav's SSR data into its page (ssr-data leak).
+  const dataNavCleanup = [
+    '  } finally {',
+    '    const __dnToken = globalThis.__vsk_ssr_token;',
+    '    delete globalThis.__vsk_ssr;',
+    '    if (__dnToken) delete globalThis[`__vsk_ssr_data_${__dnToken}`];',
+    '    delete globalThis.__vsk_ssr_token;',
+    '    delete globalThis.__vsk_ssr_data;',
+    '  }',
+  ];
   if (layoutDecls.length > 0) {
     dataCode = [
       "  if (request.headers.get('x-vesk-data') === '1') {",
-      '    let dataPage;',
       '    try {',
-      "      dataPage = await renderPage('', _pageComp, { params }, __componentRegistry, { hydrate: true, cached: _pageCompiled });",
-      '    } catch (err) {',
-      '      if (err && (err.name === \'NotFoundError\' || err.name === \'Redirect\')) throw err;',
-      '      const message = err && typeof err === \'object\' && \'message\' in err ? String(err.message) : String(err);',
-      `      return new Response(JSON.stringify({ error: ${exposeErr} ? message : 'Internal Server Error' }), { status: 500, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Vary: 'x-vesk-data' } });`,
-      '    }',
-      '    let _dataHead = dataPage.head || \'\';',
-      '    for (let _i = _layoutCompList.length - 1; _i >= 0; _i--) {',
-      "      const _dl = await renderPage('', _layoutCompList[_i], { params, children: '' }, __componentRegistry, { hydrate: true, cached: _layoutCompiledList[_i] });",
-      '      _dataHead = (_dl.head || \'\') + _dataHead;',
-      '    }',
-      "    return new Response(JSON.stringify({ path: url.pathname, params, props: dataPage.props || { params }, head: _dataHead }), {",
-      "      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Vary: 'x-vesk-data' },",
-      '    });',
+      '      let dataPage;',
+      '      try {',
+      "        dataPage = await renderPage('', _pageComp, { params }, __componentRegistry, { hydrate: true, cached: _pageCompiled });",
+      '      } catch (err) {',
+      "        if (err && (err.name === 'NotFoundError' || err.name === 'Redirect')) throw err;",
+      '        const message = err && typeof err === \'object\' && \'message\' in err ? String(err.message) : String(err);',
+      `        return new Response(JSON.stringify({ error: ${exposeErr} ? message : 'Internal Server Error' }), { status: 500, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Vary: 'x-vesk-data' } });`,
+      '      }',
+      '      let _dataHead = dataPage.head || \'\';',
+      '      for (let _i = _layoutCompList.length - 1; _i >= 0; _i--) {',
+      "        const _dl = await renderPage('', _layoutCompList[_i], { params, children: '' }, __componentRegistry, { hydrate: true, cached: _layoutCompiledList[_i] });",
+      '        _dataHead = (_dl.head || \'\') + _dataHead;',
+      '      }',
+      "      return new Response(JSON.stringify({ path: url.pathname, params, props: dataPage.props || { params }, head: _dataHead }), {",
+      "        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Vary: 'x-vesk-data' },",
+      '      });',
+      ...dataNavCleanup,
       '  }',
       '  return __renderHtml(params, url.href);',
     ].join('\n');
   } else {
     dataCode = [
       "  if (request.headers.get('x-vesk-data') === '1') {",
-      '    let dataPage;',
       '    try {',
-      "      dataPage = await renderPage('', _comp, { params }, __componentRegistry, { hydrate: true, cached: _compiled });",
-      '    } catch (err) {',
-      '      if (err && (err.name === \'NotFoundError\' || err.name === \'Redirect\')) throw err;',
-      '      const message = err && typeof err === \'object\' && \'message\' in err ? String(err.message) : String(err);',
-      `      return new Response(JSON.stringify({ error: ${exposeErr} ? message : 'Internal Server Error' }), { status: 500, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Vary: 'x-vesk-data' } });`,
-      '    }',
-      "    return new Response(JSON.stringify({ path: url.pathname, params, props: dataPage.props || { params }, head: dataPage.head || '' }), {",
-      "      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Vary: 'x-vesk-data' },",
-      '    });',
+      '      let dataPage;',
+      '      try {',
+      "        dataPage = await renderPage('', _comp, { params }, __componentRegistry, { hydrate: true, cached: _compiled });",
+      '      } catch (err) {',
+      "        if (err && (err.name === 'NotFoundError' || err.name === 'Redirect')) throw err;",
+      '        const message = err && typeof err === \'object\' && \'message\' in err ? String(err.message) : String(err);',
+      `        return new Response(JSON.stringify({ error: ${exposeErr} ? message : 'Internal Server Error' }), { status: 500, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Vary: 'x-vesk-data' } });`,
+      '      }',
+      "      return new Response(JSON.stringify({ path: url.pathname, params, props: dataPage.props || { params }, head: dataPage.head || '' }), {",
+      "        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Vary: 'x-vesk-data' },",
+      '      });',
+      ...dataNavCleanup,
       '  }',
       '  return __renderHtml(params, url.href);',
     ].join('\n');

@@ -9,7 +9,7 @@ import { buildErrorPayload, createHmrServer } from './hmr';
 import * as hmrApi from './hmr';
 import type { HmrErrorPayload } from './hmr';
 import { createDevApiRouter } from './dev-api';
-import { buildRuntimeCode } from '@vesk/adapter/src/client-bundle';
+import { buildTreeShakenRuntime, runtimeExportNames } from '@vesk/adapter/src/client-bundle';
 import { resolveWithin, installMdReadHook } from '@vesk/adapter/src/paths';
 import type { RouteNode, DevServerOptions, Manifest, VeskPlugin } from '@vesk/adapter/src/types';
 import { getPluginRecords } from './plugins';
@@ -439,7 +439,13 @@ export async function startDevServer(appDir: string, options?: DevServerOptions)
       if (result) routeTree = result.routeTree;
       const monorepoRoot = resolve(__dirname, '..', '..', '..');
       const runtimeDir = resolve(monorepoRoot, 'packages', 'runtime', 'dist');
-      runtimeBundle = buildRuntimeCode(runtimeDir);
+      // The full runtime surface for /_vesk/runtime.js. The legacy concat
+      // (buildRuntimeCode) collides on module-scope names shared by separate
+      // runtime modules (e.g. hydrateInitial in hydrate.ts and router.ts) and
+      // is a SyntaxError as a module — every import() of it fails. The
+      // tree-shaken full set is one closed IIFE + explicit re-exports, so all
+      // runtime names resolve. Matches prod, which serves client.js there.
+      runtimeBundle = await buildTreeShakenRuntime(runtimeDir, [...runtimeExportNames(runtimeDir)]);
       await reloadEventsMod();
       lastBuild = Date.now();
       // successful build clears any pending error
