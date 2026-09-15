@@ -1,4 +1,4 @@
-name: CI / Release
+name: CI
 
 on:
   push:
@@ -13,162 +13,65 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify:
-    name: Verify (typecheck, unit + e2e, dev + prod hydration, crawl, leakage)
+  tests-js:
+    name: tests.js — unit + adapter e2e + edge
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
-
-      - name: Refresh test-app deps from latest workspace build
-        run: node scripts/refresh-testapp-deps.mjs
-
-      - name: Install Chrome for puppeteer-core
-        id: chrome
-        run: |
-          npx --yes @puppeteer/browsers install chrome@stable --path "$RUNNER_TEMP/chrome" > /dev/null
-          CHROME="$(find "$RUNNER_TEMP/chrome" -type f -name chrome | head -1)"
-          if [ -z "$CHROME" ]; then echo "chrome binary not found" >&2; exit 1; fi
-          echo "path=$CHROME" >> "$GITHUB_OUTPUT"
-          echo "chrome at: $CHROME"
-
-      - name: Typecheck packages
-        run: npm run typecheck
-
-      - name: Unit + E2E suite (npm test)
+      - uses: ./.github/actions/setup
+        id: setup
+      - name: Run scripts/test.js
         env:
-          CHROMIUM_PATH: ${{ steps.chrome.outputs.path }}
-        run: npm test
+          CHROMIUM_PATH: ${{ steps.setup.outputs.chrome-path }}
+        run: node scripts/test.js
 
-      # --- Dev server phase (port 3000) ---
-      - name: Start dev server
-        run: |
-          cd test-app
-          npm install --no-audit --no-fund
-          (setsid nohup npm run dev > /tmp/dev.log 2>&1 < /dev/null &)
-          for i in $(seq 1 60); do
-            curl -s -o /dev/null http://localhost:3000/ && break
-            sleep 1
-          done
-          curl -s -o /dev/null -w "dev server: %{http_code}\n" http://localhost:3000/
-
-      - name: Hydration test (dev)
-        env:
-          CHROMIUM_PATH: ${{ steps.chrome.outputs.path }}
-        run: node tests/hydration-test.mjs
-
-      - name: SSR crawl test (dev)
-        if: always()
-        env:
-          CHROMIUM_PATH: ${{ steps.chrome.outputs.path }}
-        run: node tests/crawl.mjs
-
-      # --- Production phase (reuses the prod build produced by leakage-test) ---
-      - name: Leakage isolation suite (build + prod server)
-        run: |
-          lsof -ti:3000 2>/dev/null | xargs -r kill 2>/dev/null || true
-          node test-app/leakage-test.mjs
-
-      - name: Start production server
-        run: |
-          cd test-app
-          (setsid nohup npm run start > /tmp/start.log 2>&1 < /dev/null &)
-          for i in $(seq 1 60); do
-            curl -s -o /dev/null http://localhost:3000/ && break
-            sleep 1
-          done
-          curl -s -o /dev/null -w "start: %{http_code}\n" http://localhost:3000/
-
-      - name: Hydration test against prod
-        env:
-          CHROMIUM_PATH: ${{ steps.chrome.outputs.path }}
-          BASE: http://localhost:3000
-          VESK_TEST_TARGET: production
-        run: node tests/hydration-test.mjs
-
-      - name: SSR crawl against prod
-        if: always()
-        env:
-          CHROMIUM_PATH: ${{ steps.chrome.outputs.path }}
-          BASE: http://localhost:3000
-          VESK_TEST_TARGET: production
-        run: node tests/crawl.mjs
-
-      - name: Dump server logs (on failure)
-        if: failure()
-        run: |
-          echo "===== /tmp/dev.log ====="
-          cat /tmp/dev.log 2>/dev/null || true
-          echo "===== /tmp/start.log ====="
-          cat /tmp/start.log 2>/dev/null || true
-          echo "===== end logs ====="
-
-  platforms:
-    name: Platform deployment targets (vercel/netlify/cloudflare/deno/aws)
+  dev-test:
+    name: dev-test.mjs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        id: setup
+      - name: Run tests/dev-test.mjs
+        env:
+          CHROMIUM_PATH: ${{ steps.setup.outputs.chrome-path }}
+        run: npx tsx tests/dev-test.mjs
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+  prod-hydration:
+    name: production-hydration-test.mjs — prod hydration gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/setup
+        id: setup
+      - name: Run tests/production-hydration-test.mjs
+        env:
+          CHROMIUM_PATH: ${{ steps.setup.outputs.chrome-path }}
+        run: node tests/production-hydration-test.mjs
 
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Install Chrome for puppeteer-core
-        id: chrome
+  dev-hydration:
+    name: hydration-test.mjs — dev hydration gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/setup
+        id: setup
+      - name: Start dev server (scripts/e2e-setup.js) and run tests/hydration-test.mjs
+        env:
+          CHROMIUM_PATH: ${{ steps.setup.outputs.chrome-path }}
         run: |
-          npx --yes @puppeteer/browsers install chrome@stable --path "$RUNNER_TEMP/chrome" > /dev/null
-          CHROME="$(find "$RUNNER_TEMP/chrome" -type f -name chrome | head -1)"
-          if [ -z "$CHROME" ]; then echo "chrome binary not found" >&2; exit 1; fi
-          echo "path=$CHROME" >> "$GITHUB_OUTPUT"
-          echo "chrome at: $CHROME"
+          setsid nohup npx tsx scripts/e2e-setup.js > /tmp/e2e.log 2>&1 < /dev/null &
+          for i in $(seq 1 180); do
+            grep -q E2E_SERVERS_READY /tmp/e2e.log && break
+            sleep 1
+          done
+          grep -q E2E_SERVERS_READY /tmp/e2e.log || { echo "e2e-setup failed to start"; cat /tmp/e2e.log; exit 1; }
+          BASE=http://localhost:3002 node tests/hydration-test.mjs
+          RC=$?
+          pkill -f e2e-setup.js 2>/dev/null || true
+          exit $RC
 
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
-
-      - name: Refresh test-app deps from latest workspace build
-        run: node scripts/refresh-testapp-deps.mjs
-
-      - name: Smoke vercel
-        run: npx tsx scripts/platform-smoke.mjs vercel
-
-      - name: Smoke netlify
-        run: npx tsx scripts/platform-smoke.mjs netlify
-
-      - name: Smoke cloudflare
-        run: npx tsx scripts/platform-smoke.mjs cloudflare
-
-      - name: Smoke deno (build + live serve)
-        run: npx tsx scripts/platform-smoke.mjs deno
-
-      - name: Smoke aws
-        run: npx tsx scripts/platform-smoke.mjs aws
-
-      - name: Hydration certification — edge bundle
-        env:
-          CHROMIUM_PATH: ${{ steps.chrome.outputs.path }}
-        run: npx tsx scripts/platform-hydration.mjs edge
-
-      - name: Hydration certification — deno (live serve)
-        env:
-          CHROMIUM_PATH: ${{ steps.chrome.outputs.path }}
-        run: npx tsx scripts/platform-hydration.mjs deno
-
-  release:
+  publish:
     name: Publish to npm + GitHub tag & release
-    needs: [verify, platforms]
+    needs: [tests-js, dev-test, prod-hydration, dev-hydration]
     if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-      contains(github.event.head_commit.message, 'publish')
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -183,35 +86,30 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Resolve version (explicit from message or auto patch-bump)
-        id: version
-        env:
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+      - name: Skip if no packages/ files changed on this push
+        id: changed
         run: |
-          EXPLICIT="$(node -e '
-            const m = process.argv[1].match(/publish\s+v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/i);
-            console.log(m ? m[1] : "");
-          ' "$COMMIT_MESSAGE")"
-          if [ -n "$EXPLICIT" ]; then
-            VERSION="$EXPLICIT"
-            echo "source=commit message" >> "$GITHUB_OUTPUT"
+          BASE="${{ github.event.before }}"
+          if [ "$BASE" = "0000000000000000000000000000000000000000" ]; then BASE="$(git rev-parse HEAD^ 2>/dev/null || echo HEAD)"; fi
+          if git diff --name-only "$BASE" HEAD 2>/dev/null | grep -q '^packages/'; then
+            echo "changed=yes" >> "$GITHUB_OUTPUT"
+            echo "packages changed — publishing"
           else
-            VERSION="$(node scripts/next-version.mjs)"
-            echo "source=auto patch bump" >> "$GITHUB_OUTPUT"
+            echo "changed=no" >> "$GITHUB_OUTPUT"
+            echo "no packages/** changes — skipping publish"
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "releasing v$VERSION ($([ -n "$EXPLICIT" ] && echo 'from commit message' || echo 'auto patch bump'))"
 
       - name: Bump versions, build all packages, publish to npm
+        if: steps.changed.outputs.changed == 'yes'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: node scripts/release.mjs "${{ steps.version.outputs.version }}"
+        run: node scripts/release.mjs "$(node scripts/next-version.mjs)"
 
       - name: Commit version bumps, create tag, prepare notes
+        if: steps.changed.outputs.changed == 'yes'
         id: tag
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
+          VERSION="$(node -e "console.log(require('./packages/types/package.json').version)")"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add packages/*/package.json packages/create-vesk/src/index.js
@@ -233,7 +131,9 @@ jobs:
           } > release-notes.md
 
       - name: Create GitHub release
+        if: steps.changed.outputs.changed == 'yes'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: gh release create "v$VERSION" --title "v$VERSION" --notes-file release-notes.md --verify-tag
+        run: |
+          VERSION="$(node -e "console.log(require('./packages/types/package.json').version)")"
+          gh release create "v$VERSION" --title "v$VERSION" --notes-file release-notes.md --verify-tag

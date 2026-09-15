@@ -1,0 +1,41 @@
+name: Setup
+
+description: Checkout, install Node deps, and install a Chrome binary for puppeteer-core.
+
+inputs:
+  chrome-browser:
+    description: Chrome channel to install (chrome, chromium, chrome-for-testing...)
+    required: false
+    default: chrome
+
+outputs:
+  chrome-path:
+    description: Absolute path to the installed chrome binary
+    value: ${{ steps.chrome.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Install dependencies
+      run: npm install --no-audit --no-fund
+      shell: bash
+
+    - name: Build packages (incremental — no-op when dist is fresh)
+      run: npx tsx packages/cli/src/build-packages.ts
+      shell: bash
+
+    - name: Install Chrome for puppeteer-core
+      id: chrome
+      shell: bash
+      run: |
+        npx --yes @puppeteer/browsers install ${{ inputs.chrome-browser }}@stable --path "$RUNNER_TEMP/chrome" > /dev/null
+        CHROME="$(find "$RUNNER_TEMP/chrome" -type f -name chrome | head -1)"
+        if [ -z "$CHROME" ]; then echo "chrome binary not found" >&2; exit 1; fi
+        echo "path=$CHROME" >> "$GITHUB_OUTPUT"
+        echo "chrome at: $CHROME"
