@@ -1,0 +1,42 @@
+import { Check, Copy } from 'lucide-vesk'
+
+export component CommandTabs(props: { tabs: { label: string; command: string }[] }) {
+	const &[index] = track(0)
+	const &[copied] = track(false)
+	const &[current] = derived(() => props.tabs[index] ?? props.tabs[0])
+	const &[lines] = derived(() => current.command.split("\n"))
+
+	<div class="panel-strong min-w-0 overflow-hidden">
+		<div class="flex items-center justify-between gap-3 border-b border-border bg-background pr-1.5">
+			<div class="flex flex-wrap gap-px">
+				for (let i = 0; i < props.tabs.length; i++) {
+					const t = props.tabs[i]
+					<button
+						type="button"
+						onClick={() => index = i}
+						aria-pressed={i === index}
+						class={i === index ? "px-3 py-2 font-mono text-[11.5px] bg-foreground text-background" : "px-3 py-2 font-mono text-[11.5px] bg-surface text-muted-foreground hover:text-foreground"}
+					>{t.label}</button>
+				}
+			</div>
+			<button
+				type="button"
+				aria-label={copied ? "Copied" : "Copy command"}
+				onClick={() => {
+					navigator.clipboard.writeText(current.command).then(() => {
+						copied = true
+						setTimeout(() => { copied = false }, 1400)
+					}).catch(() => { copied = false })
+				}}
+				class="grid size-7 shrink-0 place-items-center text-muted-foreground transition-colors hover:text-foreground"
+			>
+				{copied ? <Check size={14} class="text-accent" /> : <Copy size={14} />}
+			</button>
+		</div>
+		<div class="min-h-[88px] px-4 py-4 font-mono text-[11.5px] leading-[1.9] text-foreground/85 sm:text-[12.5px]">
+			for (let i = 0; i < lines.length; i++) {
+				<div>{(i === 0 ? "$ " : "  ") + lines[i]}</div>
+			}
+		</div>
+	</div>
+}
