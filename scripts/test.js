@@ -1,4 +1,4 @@
-import { readdirSync, existsSync } from 'fs'
+import { readdirSync, existsSync, statSync } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { execSync, spawn } from 'child_process'
@@ -107,7 +107,54 @@ try {
   process.exit(1)
 }
 
-const e2eEnv = { VESK_E2E: '1', VESK_E2E_PROD_PORT: '3099', VESK_E2E_DEV_PORT: '3002' }
+// Resolve a chromium binary for the puppeteer E2E tests. Only falls back to
+// the legacy Termux path (the port of the original dev box) when nothing else
+// is present; on CI/desktop the puppeteer cache or PATH binaries are used.
+function resolveChromium(explicit) {
+  if (explicit) return explicit // hand back the explicit path (bad or good)
+  const home = process.env.HOME || '/root'
+  const dirs = [
+    resolve(root, 'node_modules', 'puppeteer', '.local-chromium'),
+    resolve(home, '.cache', 'puppeteer', 'chrome'),
+  ]
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue
+    for (const rev of readdirSync(dir)) {
+      const cand = resolve(dir, rev)
+      if (!existsSync(cand) || !isDirSync(cand)) {
+        // puppeteer cache feeds revision dirs directly; .local-chromium feeds rev/chrome-*
+        continue
+      }
+      for (const sub of readdirSync(cand)) {
+        const bin = resolve(cand, sub, 'chrome')
+        if (existsSync(bin)) return bin
+      }
+    }
+  }
+  return '/data/data/com.termux/files/usr/bin/chromium-browser'
+}
+
+function isDirSync(p) {
+  try { return statSync(p).isDirectory() } catch { return false }
+}
+
+// The E2E phase can be pointed at an external server and browser by setting
+// VESK_E2E_BASE, VESK_E2E_PROD_PORT, VESK_E2E_DEV_PORT, or CHROMIUM_PATH.
+// When a base is given, the e2e-setup server is still started on the default
+// ports so VESK_E2E=1 tests that build their own server keep working; the
+// latent base is passed through for tests that honor it (e.g. hydration-test).
+console.log(`E2E chromium: ${process.env.CHROMIUM_PATH || resolveChromium(process.env.CHROMIUM_PATH)}`)
+const e2eEnv = Object.assign(
+  {
+    VESK_E2E: '1',
+    VESK_E2E_PROD_PORT: process.env.VESK_E2E_PROD_PORT || '3099',
+    VESK_E2E_DEV_PORT: process.env.VESK_E2E_DEV_PORT || '3002',
+  },
+  process.env.CHROMIUM_PATH
+    ? { CHROMIUM_PATH: process.env.CHROMIUM_PATH }
+    : { CHROMIUM_PATH: resolveChromium(process.env.CHROMIUM_PATH) },
+  process.env.BASE ? { BASE: process.env.BASE } : {}
+)
 
 // Run adapter E2E tests
 for (const dir of testDirs) {

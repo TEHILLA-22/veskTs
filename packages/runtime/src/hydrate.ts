@@ -1,16 +1,7 @@
 import { get, scope, set_active_block } from '@vesk/runtime/src/ripple-runtime';
 import { root } from '@vesk/runtime/src/ripple-blocks';
 
-// ── temporary hydration instrumentation ────────────────────────────────────
-declare global { interface Window { __vskHydLog?: string[] } }
-let __vdId = 0;
-function _hl(...a: unknown[]) {
-	if (typeof window !== 'undefined') {
-		if (!window.__vskHydLog) window.__vskHydLog = [];
-		window.__vskHydLog.push(a.map(String).join(' | '));
-	}
-}
-// ───────────────────────────────────────────────────────────────────────────
+
 
 // Hydrators invoke user component functions outside the router. componentFn
 // runs `track()`/`effect()` calls that attach to whatever block is active.
@@ -238,7 +229,6 @@ class WalkerEngine implements HydrateWalker {
 	}
 
 	nextElement(tag?: string): Element {
-		_hl('nextElement', String(tag ?? '-'), 'cursor=' + this.idx + '/' + this.markers.length);
 		while (this.idx < this.markers.length) {
 			const tm = this.markers[this.idx];
 			if (tm.state === 'claimed') {
@@ -247,12 +237,16 @@ class WalkerEngine implements HydrateWalker {
 			}
 			const el = tm.comment.nextElementSibling as Element | null;
 			if (tag && el && el.tagName.toLowerCase() !== tag) {
-				_hl('  MISMATCH skip', 'tag=' + (el && el.tagName), 'asked=' + tag, 'marker.next=', (tm.comment.nextElementSibling && (tm.comment.nextElementSibling as Element).outerHTML.slice(0, 40)));
+				// SSR rendered a different tag than this claim wants. Leave the
+				// marker AND the element untouched and back off without moving
+				// the cursor: the element's real owner may still claim it, and
+				// consuming it here would strip its SSR text, stamp a claim on
+				// a node this render does not own, and drift every later claim
+				// into fresh-node fallback (the empty `/store/widget` h1).
 				break;
 			}
 			this.idx++;
 			const adopted = adoptElement(tm.comment, tag);
-			_hl('  ADOPT', 'cursor->' + this.idx, 'adopted=' + (adopted && (adopted as Element).outerHTML.slice(0, 30)), 'left-markers=' + (this.markers.length - this.idx));
 			if (adopted === null) {
 				// SSR rendered no element after this marker. Fall out to a
 				// fresh element instead of hunting through the remaining
@@ -300,7 +294,6 @@ class WalkerEngine implements HydrateWalker {
 			});
 			this.idx += subMarkers.length;
 		for (const m of subMarkers) m.state = 'claimed';
-		_hl('subWalker', 'root=' + (rootEl && rootEl.outerHTML.slice(0, 30)), 'sub=' + subMarkers.length, 'markers-marked-claimed-sm=' + subMarkers.length);
 		// A component's SSR content always carries interior `<!--vsk-->` markers
 		// that the child's own hydrator claims. Exception: plain JS components
 		// (lucide icons etc.) render inside the compiler's boundary wrapper
