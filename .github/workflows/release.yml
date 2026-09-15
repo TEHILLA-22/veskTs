@@ -17,6 +17,7 @@ jobs:
     name: tests.js — unit + adapter e2e + edge
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
         id: setup
       - name: Run scripts/test.js
@@ -28,6 +29,7 @@ jobs:
     name: dev-test.mjs
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
         id: setup
       - name: Run tests/dev-test.mjs
@@ -39,6 +41,7 @@ jobs:
     name: production-hydration-test.mjs — prod hydration gate
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
         id: setup
       - name: Run tests/production-hydration-test.mjs
@@ -50,6 +53,7 @@ jobs:
     name: hydration-test.mjs — dev hydration gate
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
         id: setup
       - name: Start dev server (scripts/e2e-setup.js) and run tests/hydration-test.mjs
