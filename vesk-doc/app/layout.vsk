@@ -6,7 +6,7 @@ interface LayoutProps {
 	children?: Component
 }
 
-component Layout(props: LayoutProps) {
+async component Layout(props: LayoutProps) {
 	<Head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />

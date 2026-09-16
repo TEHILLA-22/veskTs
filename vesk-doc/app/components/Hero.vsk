@@ -1,6 +1,7 @@
 import { CommandTabs } from './CommandTabs.vsk'
+import { VersionBadge } from './VersionBadge.vsk'
 
-export component Hero {
+export async component Hero {
 	const tabs = [
 		{ label: "web", command: "npx create-vesk@latest my-app\ncd my-app\nnpm install\nnpm run dev" },
 		{ label: "kotlin native", command: "npx create-vesk-native my-app\ncd my-app\nnpm install\nnpm run dev" },
@@ -10,7 +11,7 @@ export component Hero {
 			<div>
 				<div class="rise mb-6 inline-flex items-center gap-2 border border-border px-2.5 py-1">
 					<span class="size-1.5 bg-accent"></span>
-					<span class="font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">compiler-first framework · v0.2.16</span>
+					<span class="font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">compiler-first framework · <VersionBadge /></span>
 				</div>
 				<h1 class="rise rise-1 font-display text-[40px] font-semibold leading-[0.95] tracking-tight text-balance sm:text-6xl lg:text-7xl">
 					Build once.<br />
@@ -57,7 +58,7 @@ export component Hero {
 					<div class="flex items-center justify-between border-t border-border px-3 py-2 font-mono text-[10px] text-muted-foreground">
 						<span>output → .vesk/</span>
 						<span class="flex items-center gap-1.5">
-							<span class="size-1.5 bg-accent caret"></span> v0.2.16
+							<span class="size-1.5 bg-accent caret"></span> <VersionBadge />
 						</span>
 					</div>
 				</div>

@@ -11,7 +11,7 @@ import { Showcase } from './components/Showcase.vsk'
 import { Roadmap } from './components/Roadmap.vsk'
 import { FinalCta } from './components/FinalCta.vsk'
 
-component Home {
+async component Home {
 	<Head>
 		<title>Vesk — The compiler-first framework for web and native apps</title>
 		<meta name="description" content="Vesk is a compiler-first application framework. Write one component model and compile it into optimized web and native Kotlin applications." />

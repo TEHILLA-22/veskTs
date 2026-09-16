@@ -1612,6 +1612,39 @@ describe('Client Codegen — Async Components', () => {
 			expect(e.message).toContain('Child');
 		}
 	});
+
+	// Cross-file imported children cannot be named in the local asyncComps
+	// set (that set only covers same-file declarations), so the await must be
+	// driven by the *parent's* async-ness — mirroring the server side. A
+	// sync child scoped in the same file is the closest single-file proxy for
+	// an imported child whose async-ness is invisible to this compilation.
+	it('[normal] async parent awaits every child, even one whose own file is not compiled here', () => {
+		const code = compileClient(`
+			component SyncChild() {
+				<div>hi</div>
+			}
+			async component Parent() {
+				const data = await Promise.resolve('hi')
+				<SyncChild />
+			}
+		`, null, { forceClient: true });
+		expect(code).toContain('async (props) => {');
+		expect(code).toContain('await __components["SyncChild"]');
+	});
+
+	it('[hydrate] async parent awaits imported child in hydrate mode', () => {
+		const code = compileClient(`
+			component SyncChild() {
+				<div>hi</div>
+			}
+			async component Parent() {
+				const data = await Promise.resolve('hi')
+				<SyncChild />
+			}
+		`, null, { hydrate: true, forceClient: true });
+		expect(code).toContain('async (props, __registry, __hydrate) => {');
+		expect(code).toContain('await __components["SyncChild"]');
+	});
 });
 
 // ── JSX in dynamic expressions (esrap tsx fallback) ───────────

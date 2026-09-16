@@ -1,205 +1,443 @@
-# Vesk — handoff (active session, Sep 15)
+# Vesk — handoff (active session, Sep 16)
 
 ## Objective
-Make the hydration/SSR CI gates green at HEAD `8bbe77f` ("fixing hydration bugs",
-parent `caf8b5f`). Concretely:
-1. **Production gate** — `VESK_E2E=1 node tests/production-hydration-test.mjs` (dev servers
-   on :3002 dev / :3099 prod, `CHROMIUM_PATH` defaults to
-   `/data/data/com.termux/files/usr/bin/chromium-browser`). **Now PASSING 52/52** after the
-   per-token slot + settle fix below.
-2. **Dev gate** — `BASE=http://localhost:3002 node tests/hydration-test.mjs` (360 tests).
-   **Currently 351 passed / 9 failed.** This is the only gate still red.
-3. After green: full `node scripts/test.js` suite + `npm run typecheck` + remove temporary
-   instrumentation + delete stray probe files + update `TODO.md`. Do **not** commit
-   instrumentation/probes into tests.
 
-## What's done and verified green (do not regress)
-- **Production handoff fix (the big one).** The async `useFetch` (posts) SSR data never
-  reached the client because the fetch promise was torn down by `clearSsrCells` before any
-  settle, and its `.then`/`setSsrData` callbacks fired outside AsyncLocalStorage scope after
-  the render token was deleted.
-  - `packages/runtime/src/resource.ts`: helpers `ssrSlotFor`/`writeSsrSlot`;
-    `getSsrData` precedence = sink → `__vsk_ssr_data_<token>` slot → flat `__vsk_ssr_data`;
-    `setSsrData(key, value, ownerToken?)` writes sink + flat + slot;
-    `clearSsrData` clears flat + current-token slot; `startRequest` server branch captures
-    `startToken = g().__vsk_ssr_token` at fetch start and passes it into `setSsrData`.
-  - `packages/compiler/src/server-render.ts`: `doRender` reuses an existing
-    `__vsk_ssr_token` instead of regenerating (handler sequence is
-    `renderPage(page)` → `renderPage(layouts)` → `renderFullPage`, see
-    `test-app/.vesk/<out>/functions/index.js` lines 71/82/86); the async branch and the
-    stream path now `await settleSsrPromises(renderToken)` (`Promise.allSettled` over
-    `__vsk_ssr_promises_<token>`) BEFORE `clearSsrCells`; `clearSsrCells` no longer deletes
-    the token; `renderFullPage`/`renderPageStream` merge `{ ...ssrSink.snapshot(), ...slot }`
-    (flat-global merge intentionally **dropped** — c78a621-class cross-request leak via
-    `__vsk_ssr_data` flat; do not reintroduce), emit data scripts, then in `finally`
-    delete token + slot and `pruneSsrDataSlots()` (caps abandoned `__vsk_ssr_data_*` at 40).
-    Sync `doRender` stays **synchronous** when no `__vsk_ssr_promises_<token>` exist — 40
-    non-awaited `render(` calls in `packages/compiler/src/integration.test.ts` and ~7
-    `renderPage(...).body` usages (lines 86,95,102,112,173,494,1535) depend on it.
-  - One request = one token = one slot; `renderFullPage` now emits `/ssr-data.js?t=<token>`
-    (external script) into a global store `__vsk_ssr_data_store` (cap 100) via
-    `storeDataScriptGlobal` in `packages/adapter/src/runtime-bundle.ts` (lines 89-108);
-    `/ssr-data.js` route (dev 566/`packages/adapter/src/dev-server.ts`, prod ~315/`
-    packages/adapter/src/prod-server.ts`) serves and **deletes** the entry.
-- **Tests/probes:**
-  - `npx tsx packages/runtime/src/resource.test.ts` — **37/37** (slot/get/set ordering).
-  - `npx tsx packages/compiler/src/integration.test.ts` — **128/128**.
-  - `npm run typecheck` — clean.
-  - `VESK_E2E=1 node tests/production-hydration-test.mjs` — **52/52**: all hydration
-    markers claimed, "posts from useFetch SSR rendered: yes", zero page errors; `/`
-    (3099) serves `/ssr-data.js?t=…` carrying the full 5-post `__vsk_ssr_data` JSON and
-    `<main>` renders all 5 posts server-side.
-- **Dev server repairs that took the dev gate from 317/43 → 351/9:**
-  - Dev server had **no `/ssr-data.js` route** — SPA fallback served the HTML document as
-    the script payload ("Unexpected token '<'" everywhere). The feature (commit `85d8dd6`,
-    "fix: serve hydration data as external script (CSP-safe) + async discipline hardening")
-    was added to prod-server + runtime stored-procedure but **never dev-server**. Added the
-    route in `packages/adapter/src/dev-server.ts` (~566) with `safeJsonForScript` imported
-    from `@vesk/compiler/src/server-codegen`.
-  - Dev `doBuild()` built without plugins → raw 75-byte `global.css`. Now passes
-    `plugins: options?.plugins` (dev-server.ts:434); `scripts/e2e-setup.js:55` passes
-    `plugins` to `startDevServer`. Verify: dev css now 40307 bytes; `/ssr-data.js?t=nope` →
-    `// no ssr data`.
-  - `packages/cli/src/dev-server.ts` is a **separate flavor** (`/_vesk/ssr-data.js?t=`,
-    ~line 399 + handler ~1108, `getActiveDevPlugins`). Not the gate path, but check parity
-    before touching.
+Make the `@vesk/compiler` version badge live from npm in vesk-doc: replace hardcoded
+`v0.2.16` with the real latest registry version (currently `0.2.25`), fully working in
+SSR-baked HTML and client hydration, with zero console errors.
 
-## What's failing — 9 dev failures (`devhyd8.log`)
-Section `=== TEST 18: SSR data integrity across all routes ===` in
-`tests/hydration-test.mjs` (DATA_ROUTES = {`/`,`/async`,`/posts`} at line 1131;
-FULL_ROUTES loop 1161-1186; per-route fresh `browser.newPage()` + `goto` + `networkidle0`
-+ `(document.documentElement.outerHTML.match(/ssr-data\.js/g)||[]).length`):
-- `✗ /blog/hello-world has 1 ssr-data script ref(s) (expected 0)` (line 206)
-- `✗ /comp-test has 1 ssr-data script ref(s) (expected 0)` (line 216)
-- `✗ no ssr-data script leaked into non-data routes — /blog/hello-world:1, /comp-test:1`
-  (line 264, aggregate)
-- Plus 6 earlier failures: `✗ No error loading runtime module` (line 67) and
-  `✗ hydrateViewport exported` / `hydrateIdle` / `hydrateOnInteraction` / `collectVskMarkers`
-  / `createHydrateWalker` (lines 68-72) — `import('/_vesk/runtime.js')` from `page.evaluate`
-  is missing those 5 client-barrel names. **Check whether these are pre-existing / baseline
-  parity** (they existed in the very first dev run too) vs a regression from the adapter
-  dev `buildRuntimeCode` concatenation failing to re-export them (see
-  `packages/adapter/src/client-bundle.ts` `runtimeExportNames` /
-  `packages/runtime/src/index-client.ts` client barrel; the legacy concat fallback strips
-  `export ... from` lines and re-emits one `export { <names> }` from index-client re-export
-  names).
+## What's working and verified
 
-## Debugging evidence trail for the ssr-data leak (device/pinned)
-- **Not reproducible in isolation:** direct `curl` (plain or browser headers) and a puppeteer
-  fresh-page load of `/blog/hello-world`, `/comp-test` on both 3002 and 3099 → **0 refs**,
-  even after first loading `/` `/about` `/blog` in sequence (fresh pages) → 0 refs.
-- **Reproducible only when the full suite has run before** (Test 1 … Test 17 warm the
-  server: repeated `/` and `/async` full loads, SPA navs across every route via the
-  router, back/forward, error-boundary navs, `/broken` error renders, X-Vesk-Data
-  data-fetch navs).
-- **`[render-trace]`** (added to renderFullPage ~server-render.ts:487-493 and
-  renderPageStream ~:652-662, gated on `process.env.VESK_SSR_TRACE`): every data-less route
-  renders `keys=∅ slot=∅ sink=∅` — **the merge is clean at render time for the leaking
-  routes**. `/async`/`/posts` renders show `keys=posts slot=posts sink=∅` (slot = page's own
-  data, correct).
-- **`[body-trace]`** (dev-server.ts:649-651, logs when a served text/html body contains
-  the ref): **zero hits in every suite run** → the served HTML bodies never contain the
-  ref. Combined with the above: the ref is NOT produced by the server-side render/merge.
-- **`[ssr-data-trace]`** (dev-server.ts:571, logs token + Referer + store payload shape):
-  the browser DOES fetch `/ssr-data.js` from the leaked pages — Referer
-  `http://localhost:3002/blog/hello-world` (token e.g. `f103b6`) and
-  `http://localhost:3002/comp-test` (token `567d94`). Payloads carry `posts` /
-  `/api/posts` data even though neither route fetches anything.
-- **`[leak-debug]`** (temporary patch in `tests/hydration-test.mjs` 18a, dumps
-  `script[src]` list + innerHTML count + `typeof window.__vsk_ssr_data`) for the failing
-  routes shows DOM srcs:
-  ```
-  http://localhost:3002/pwa-init.js
-  http://localhost:3002/ssr-data.js?t=f103b6bb7986cc94a1b6738c   (innerCount 1, hasVar=true)
-  http://localhost:3002/_vesk/static/client.js
-  http://localhost:3002/_vesk/hmr.js
-  ```
-  So the ref IS in the live DOM (a `<script src>` in `<head>`) of a fresh full page, with a
-  token whose global-store entry holds posts. `pwa-init.js` = head-plugin script
-  (`<script src="/pwa-init.js" defer>` per `packages/adapter/src/plugin-head.test.ts:51`)
-  living in `test-app/.vesk/dev/static/public/pwa-init.js` — verify it is normal/expected.
-- **Token lifecycle is central:** `renderFullPage` reuses `__vsk_ssr_token` if present and
-  deletes token+slot in `finally`. The store entry referenced by the leaked pages must have
-  been created by a render whose ssrData = posts and whose token the later clean render
-  re-emitted — i.e. a **stale live `__vsk_ssr_token` (and/or stale slot) surviving from an
-  earlier posts render** into a later clean render. Because fresh isolated runs never leak,
-  the survivor is produced by an earlier suite request pattern (candidate: aborted render,
-  stream render, error-boundary render, or an async `.then` landing after its finally and
-  re-creating `__vsk_ssr_data_<token>`).
-- Note: earlier runs (devhyd6/7) served leak payloads as found; in devhyd8 those exact
-  fetches already show `payload=NONE` (entry consumed by the earlier full load of `/`-family
-  before the 18a loop), consistent with token reuse + one-shot delete.
+**SSR is correct.**
+- `/` returns HTTP 200, **0 × `[object Promise]`**, **3 × `v0.2.25`** baked into
+  server HTML (hero label, pipeline spot, footer).
+- `/docs/components` returns HTTP 200, **0 × `[object Promise]`**, **1 × `v0.2.25`**
+  baked (footer only).
 
-## Instrumentation added this session (remove before finishing)
-All gated (`VESK_SSR_TRACE` env) or temporary — safe to strip at cleanup:
-- `packages/compiler/src/server-render.ts` — `[render-trace]` blocks after both merges.
-- `packages/adapter/src/dev-server.ts` — `[ssr-data-trace]` (incl. referer) in the
-  `/ssr-data.js` route; `[body-trace]` in the main HTML-serving block.
-- `tests/hydration-test.mjs` — `[leak-debug]` dump in the 18a assert block (REVERT THE TEST:
-  it is a tracked repo test; also confirm the `innerCount`/`hasVar` probe is not committing
-  anything).
-- Also still pending from earlier: remove `_hl`/`__vskHydLog` instrumentation in
-  `packages/runtime/src/hydrate.ts` (that file is modified in the working tree).
+**Client hydration is clean — no appendChild errors.**
+- The original client bug (`Failed to execute 'appendChild' on 'Node': parameter 1 is
+  not of type 'Node'`) is fixed. Probe (monkeypatched `appendChild`/`insertBefore`)
+  shows zero `BAD-APPEND`/`BAD-INSERT` console errors, zero pageerrors, on both `/`
+  and `/docs/components`.
+- `BADGE: 3` on `/`, `BADGE: 1` on `/docs/components` — badge text is live in DOM.
 
-## Environment / ops how-to (Termux-proot; no systemd; no `ss`/`lsof`)
+**Badge content is correct on the client (second spot + footer).**
+- Pipeline spot (`<span class="flex items-center gap-1.5">`): caret dot then badge,
+  correct order, no spacing issue.
+- Footer (`compiler <VersionBadge />`): "compiler v0.2.25" — correct.
+
+## What's NOT working — the hero label ordering bug
+
+The hero label renders as `v0.2.25compiler-first framework · ` on the client — the badge
+comes **before** the label text, missing the "· " separator visually (though the text
+node technically contains it, it follows the badge in DOM order).
+
+**SSR HTML (correct order):**
+```
+<span class="font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+    compiler-first framework · 
+    <!--vsk-->
+    <span style="display:contents">
+        <!--vsk-->
+        <span>v0.2.25</span>
+    </span>
+</span>
+```
+(Text node first, then badge wrapper — verified via `curl` + `grep`.)
+
+**Client post-hydration DOM (WRONG order):**
+```
+<span class="font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground" data-vsk-claimed>
+    <span style="display:contents" data-vsk-claimed>
+        <span data-vsk-claimed>v0.2.25</span>
+    </span>                                ← badge FIRST
+    compiler-first framework ·            ← text SECOND (single node, no duplicates)
+</span>
+```
+(Verified via puppeteer `evaluate` dumping `childNodes` of the label span.)
+
+**Generated hydrate code for this label** (`page-index-new.js:57614-57626`):
+```js
+// claim the label span
+const $n5 = __hydrate.nextElement("span");
+$n5.setAttribute("class", "font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground");
+
+// text node — FRESH, not claimed in place
+const $n6 = document.createTextNode("compiler-first framework \xB7 ");
+if ($n6.parentNode !== $n5) {
+  if (!$n5 || $n6.parentNode == null || !$n5.contains($n6)) $n5.appendChild($n6);
+}
+
+// badge — awaited, claimed in place via subWalker
+const $n7 = await __hydrators["VersionBadge"]({}, __registry, __hydrate.subWalker(__hydrate.nextElement()));
+if ($n7.parentNode !== $n5) {
+  if (!$n5 || $n7.parentNode == null || !$n5.contains($n7)) $n5.appendChild($n7);
+}
+```
+
+**Hydration claim path for VersionBadge** (`page-index-new.js:57392-57421`):
+```js
+__hydrators["VersionBadge"] = async (props, __registry, __hydrate) => {
+  const $root = __hydrate.root;                      // claimed span wrapper
+  let __pendingChild = null;
+  const latest = await useFetch.json(/* ... */);      // AWAIT — fetches client-side
+  const $n0 = __hydrate.nextElement("span");          // claims inner <span>v0.2.25</span>
+  const $n1 = document.createTextNode("v");
+  // ... claim/append text nodes into $n0 ...
+  if ($n0.parentNode !== $root) { $root.appendChild($n0); }
+  return __pendingChild || $root;
+};
+```
+
+**Hypothesis:** During the async `await useFetch.json(...)` in the badge hydrate fn,
+the subWalker is suspended. After the await, `nextElement("span")` either claims a
+different span (because the walker cursor wasn't positioned correctly across the await)
+or the `display:contents` wrapper gets repositioned during the claim. The label's
+text node is created fresh and appended at END — if the badge wrapper was already
+claimed/repositioned first (or moved during the async gap), the append ends up
+badge-before-text. The `<!--vsk-->` comment markers (SSR claim anchors) are all gone
+from the post-hydration DOM, meaning the entire label's children were rebuilt or
+reclaimed, not left in place.
+
+**Second pipeline spot is correct** — same badge code but inside
+`<span class="flex items-center gap-1.5">` where the text before it is just the
+`<span class="size-1.5 bg-accent caret"></span>` dot, which is an ELEMENT (claimed by
+`nextElement`), not a text node (created fresh via `createTextNode`). This suggests the
+ordering bug specifically affects mixed text-node + async-component children where the
+text is recreated (not claimed in place).
+
+**Key probe files** (all in `/tmp/opencode/scroll-test/`):
+- `probe-badappend.mjs` — monkeypatches `appendChild`/`insertBefore`, catches non-Node
+  values, logs BAD-APPEND/BAD-INSERT + `console.error` + pageerror. Clean now.
+- `probe-label.mjs` — dumps label span's `childNodes` types and text for the badge area.
+- `probe-dom.mjs` — finds all elements whose `textContent` includes `v0.2.25`.
+
+Run with: `node /tmp/opencode/scroll-test/probe-*.mjs http://localhost:3000/`
+Requires: `ln -s /root/vesk/node_modules /tmp/opencode/scroll-test/node_modules`
+(all symlinks already exist).
+
+---
+
+## display:contents wrapper — what it is, why NOT to strip it
+
+Every component boundary in SSR emits `<!--vsk--><span style="display:contents">`
+(`server-jsgen.ts:42`, `HYDRATE_COMPONENT_WRAPPER`). This is the hydration walker's
+claim anchor — it tells the runtime "the next element is a component root; claim it
+here." Removing it globally would break hydration for every component child
+(`server-codegen.test.ts:1436-1491` has multiple tests asserting the wrapper exists;
+`hydrate.ts:300` depends on the marker+wrapper pattern). The wrapper itself is
+`display:contents` — it takes no layout space — so the visual issue is the claim-ORDER
+bug, not the wrapper itself.
+
+**User request:** "get rid of display content here" — this can only be done safely
+by fixing the underlying claim-order bug (badge lands before text), or by removing the
+wrapper per-component (not currently possible without a framework option). Do not strip
+`HYDRATE_COMPONENT_WRAPPER` without fixing hydration claiming first.
+
+---
+
+## Async parent rule — confirmed, Layout DOES need async
+
+**The rule (user-stated):** to render an async component, the parent must be async.
+This propagates up the entire tree.
+
+**Why this is necessary:**
+- *Server:* `server-jsgen.ts:431-448` — `componentCallToJS` only awaits a child
+  call (`awaitKw = 'await '`) when `isAsync` is true for the *parent* (not the
+  child). If the parent is sync, it pushes the child's Promise directly into
+  `__out` → `[object Promise]`.
+- *Client (after our fix):* `client-codegen.ts:647` — now `awaitKw = ctx.isAsyncScope
+  ? 'await ' : ''` (parent-driven). If the parent is sync, it calls the async child
+  without await → `appendChild(Promise)` → "parameter 1 is not of type Node".
+- *Same-file guard:* `ir-generator.ts:1224-1233` — throws `asyncChildInSyncParent`
+  for same-file violations, but does NOT catch cross-file imported async children.
+
+**Verified component chain in vesk-doc:**
+```
+VersionBadge  (async — await useFetch)
+  ↑ called by
+Footer        (async — direct child of VersionBadge)
+  ↑ called by
+Layout        (async — renders <Footer />, line 21)
+DocsLayout    (async — renders <Footer />, line 27)
+Home          (async — renders <Hero />, which renders VersionBadge)
+Hero          (async — renders <VersionBadge />, lines 14 + 61)
+```
+
+Layout `async` is REQUIRED because it calls Footer. docs/layout `async` is required
+for the same reason. De-async-ing any ancestor reintroduces `[object Promise]` on
+SSR and appendChild errors on client. This is by design, not over-engineering.
+
+---
+
+## The compiler fix — client-codegen parent-driven await
+
+**File changed:** `packages/compiler/src/client-codegen.ts:647`
+
+**Before (broken for cross-file):**
+```ts
+const awaitKw = ctx.asyncComps.has(node.componentName) ? 'await ' : '';
+```
+Only awaits a child if its name is in the per-file `asyncComps` set (computed from
+`computeAsyncComponents` which only sees same-file declared-async components).
+Cross-file imported async children (VersionBadge from Hero) were NOT awaited →
+Promise appended.
+
+**After (mirrors server semantics):**
+```ts
+const awaitKw = ctx.isAsyncScope ? 'await ' : '';
+```
+Awaits every child whenever the *parent's* scope is async (`ctx.isAsyncScope` is set
+at `client-codegen.ts:1528` from `comp.isAsync || asyncComps.has(comp.name)`). This
+matches the server emission (`server-jsgen.ts:431-448` where `awaitKw = isAsync`).
+
+**Tests added:** `packages/compiler/src/client-codegen.test.ts` — two new tests in
+the `Async Components` describe block:
+- `[normal] async parent awaits every child, even one whose own file is not compiled here`
+- `[hydrate] async parent awaits imported child in hydrate mode`
+
+Both prove the parent-driven property: a SYNC child called from an async parent
+generates `await __components["SyncChild"]` (previously would NOT have been awaited).
+
+**Rebuild required after compiler source edits:** `npx tsx packages/cli/src/build-packages.ts`
+
+**Test result:** 247 passed, 0 failed.
+
+---
+
+## useFetch API review
+
+### Surface
+
+```ts
+useFetch<T>(urlOrFn: string | (() => Promise<T>), options?): Resource<T>
+useFetch.json<T>(url, options?): Resource<T>
+useFetch.text<T>(url, options?): Resource<T>
+useFetch.arrayBuffer<T>(url, options?): Resource<T>
+useFetch.stream(urlOrFn, options?): Resource<string>
+```
+
+`Resource<T>` extends `PromiseLike<T>` with `.loading`, `.error`, `.data`, `.refresh()`,
+`.abort()`, `._state` (internal `Tracked`).
+
+### How it works
+
+- `key` option (or URL string as default key) — deduplicates across instances on the
+  same page (same key = same in-flight fetch).
+- On the server: `useFetch` starts the request, SSR data is written to a per-request
+  sink/slot (`setSsrData`), then `resolveSsrResources()` snapshots it into a
+  `__vsk_ssr_data` script tag. On the client, `getSsrData(key)` hydrates the Resource
+  immediately without re-fetching.
+- `into?: Tracked<T>` — streams the result into a tracked cell; useful for streaming
+  (`useFetch.stream`) or reactive bindings without `await`.
+- `staleTime`, `retry`, `retryDelay`, `timeout`, `enabled`, `dedupe` — standard
+  fetch-resource options.
+- `Resource<T>` is `PromiseLike` (has `.then`) — `await useFetch.json(...)` returns the
+  resolved data directly (the `toData()` accessor unwraps the internal state).
+
+### User-friendliness assessment
+
+**Easy parts:**
+- `await useFetch.json<T>(url)` is straightforward and familiar (mirrors SWR/TanStack
+  Query mental model).
+- `key` deduplication is automatic and sensible.
+- `staleTime` + `retry` + `timeout` are well-known options.
+- `.loading` / `.error` / `.data` on the accessor are intuitive for loading states.
+
+**Confusing/complex parts:**
+- **PromiseLike vs Promise:** `Resource<T>` is NOT a true `Promise` — it's
+  `PromiseLike` (has `.then` but no `.catch`/`.finally`). `await resource` works but
+  `resource.catch(...)` doesn't compile. Surprising if you expect Promise behavior.
+- **`into` cell pattern:** requires understanding of the reactivity system (`const
+  &[x] = track('')` + `into: x`) — not discoverable without reading runtime internals.
+- **SSR hydration implicitness:** the data handoff happens behind the scenes via
+  `globalThis.__vsk_ssr_data`. If the key changes or the fetch runs in a different
+  scope, the handoff silently fails and the client re-fetches. No warning.
+- **`useFetch` vs `useFetch.json`:** `useFetch` accepts a URL string *or* a fetcher
+  function. The string form auto-creates a fetcher (via `createFetcher`), but if you
+  pass a function, you lose `timeout`/`retry`/`dedupe` behavior unless you implement
+  them yourself. The relationship between `useFetch(url)` vs `useFetch(() =>
+  fetch(url).then(r => r.json()))` is not obvious.
+- **`enabled: false`** — sets data to `undefined` without any indication. Unlike TanStack
+  Query's `enabled`, there's no `fetchNextPage` or retry-on-enable. The user must call
+  `.refresh()` manually.
+- **Streaming (`useFetch.stream`):** re-evaluates the URL function per fetch; `into` is
+  progressive; `onChunk` gives raw chunks. Powerful but the `urlOrFn` + `into` + `onChunk`
+  triad requires reading runtime source to understand. No JSDoc explaining when `urlOrFn`
+  is re-evaluated vs cached.
+
+### JSDoc quality
+
+- `Resource<T>` interface: **no JSDoc** on `.loading`, `.error`, `.data`, `.refresh()`,
+  `.abort()`.
+- `UseFetchOptions<T>`: only `into` has a JSDoc comment (`/** Target tracked cell — ...`).
+  All other options (`key`, `staleTime`, `keepPreviousData`, `retry`, `retryDelay`,
+  `timeout`, `enabled`, `dedupe`) have **zero documentation**.
+- `useFetch` function: **no JSDoc** at all. No description of `key` deduplication, no
+  note about the server/client handoff, no note about `PromiseLike` vs `Promise`.
+- `useFetch.stream`: has a 5-line JSDoc (the best in the file) explaining `into`,
+  `onChunk`, and re-evaluation semantics.
+- `HttpError` / `TimeoutError`: no JSDoc (trivial classes, acceptable).
+- `createResource`: no JSDoc (internal, acceptable if `useFetch` is the public API).
+
+**Bottom line:** the API surface is clean and intuitive for the happy path
+(`await useFetch.json(url)`). The confusing parts are: (1) `PromiseLike` vs `Promise`
+gotcha, (2) no JSDoc on `UseFetchOptions` fields or `useFetch` itself, (3) the
+`into` streaming pattern requires reactivity knowledge, (4) the server/client
+handoff is implicit and undocumented.
+
+---
+
+## Repo state — uncommitted changes (to commit on `bug` branch)
+
+```
+ M packages/compiler/src/client-codegen.ts        ← parent-driven await fix
+ M packages/compiler/src/client-codegen.test.ts   ← 2 new async tests
+ M vesk-doc/app/components/Footer.vsk             ← import + async
+ M vesk-doc/app/components/Hero.vsk               ← import + async
+ M vesk-doc/app/docs/layout.vsk                   ← async + render Footer
+ M vesk-doc/app/layout.vsk                        ← async
+ M vesk-doc/app/page.vsk                          ← async (no useFetch)
+ M vesk-doc/package.json                          ← refreshed tarball pins
+ M vesk-doc/package-lock.json
+ D vesk-doc/tarballs/*-0.2.24-ci.1789529935608.*  ← old tarballs
+?? vesk-doc/app/components/VersionBadge.vsk       ← NEW component (live from npm)
+?? vesk-doc/tarballs/*-0.2.24-ci.1789536357382.*  ← fresh tarballs (fixed CLI)
+```
+
+## Environment & commands
+
+**Dev server (running now):**
+- PID: found via `ps aux | grep "vesk dev" | grep -v grep`
+- CWD: `/root/vesk/vesk-doc`
+- Log: `/tmp/opencode/vesk-dev.log`
+- Restart: `cd /root/vesk/vesk-doc && setsid node node_modules/.bin/vesk dev > /tmp/opencode/vesk-dev.log 2>&1 < /dev/null &`
+  (must use `setsid` — without it, the tool's timeout kills the background process)
+
+**Refresh vesk-doc deps after compiler/runtime source changes:**
 ```bash
-# rebuild all packages after any compiler/runtime/adapter src edit
-npx tsx packages/cli/src/build-packages.ts
-# launch e2e (prod :3099 + dev :3002) — USE THIS EXACT DETACH, never pkill -f:
-#   `pkill -f e2e-setup.js` matches the tool's own command line and self-kills the shell
-rm -f /tmp/opencode/e2e-setup.log
-setsid nohup env VESK_SSR_TRACE=1 npx tsx scripts/e2e-setup.js > /tmp/opencode/e2e-setup.log 2>&1 < /dev/null &
-echo "pid=$!" > /tmp/opencode/e2e.pid      # gives you a clean kill handle
-# poll READY in a SHORT separate call (the launch call always pends ~120s cosmetically):
-for i in $(seq 1 30); do grep -q E2E_SERVERS_READY /tmp/opencode/e2e-setup.log && break; sleep 5; done
-# kill by saved pid when needed:  kill -9 $(cat /tmp/opencode/e2e.pid)
-# ports check (ss/lsof unreliable here):
-node -e 'const n=require("net");for(const p of [3002,3099]){const s=n.createServer().once("error",e=>console.log(p,"BUSY")).listen(p,()=>{console.log(p,"FREE");s.close()});}'
-# run the gates (dev gate takes >120s → timeout 420000):
-BASE=http://localhost:3002 node tests/hydration-test.mjs
+npx tsx packages/cli/src/build-packages.ts           # rebuild dist/
+node scripts/refresh-testapp-deps.mjs vesk-doc        # repack tarballs + npm install
+# then restart dev server
+```
+Current tarball pins: `0.2.24-ci.1789536357382` (vesk-doc refreshed; test-app NOT
+refreshed — its pins are still the older `1789529935608` set).
+
+**Compiler tests:**
+```bash
+npx tsx packages/compiler/src/client-codegen.test.ts   # 247 passed, 0 failed
+npx tsx packages/compiler/src/server-codegen.test.ts
+npx tsx packages/compiler/src/integration.test.ts
+npx tsc --noEmit -p packages/compiler/tsconfig.json     # typecheck
+```
+
+**Runtime tests (per runtime AGENTS.md):**
+```bash
+cd packages/runtime && npx tsx src/track.test.ts
+cd packages/runtime && npx tsx src/resource.test.ts
+cd packages/runtime && npm run build && npm run typecheck
+```
+
+**Production hydration gate:**
+```bash
 VESK_E2E=1 node tests/production-hydration-test.mjs
 ```
-- `scripts/e2e-setup.js` is plain JS; launches prod build then `startDevServer` (adapter).
-- Test harness: `expect()` only `toBe`/`toEqual` (use `.toBe(undefined)`); `rg` not
-  installed (use grep); dev = :3002, prod = :3099.
+Needs test-app on `:3002` (dev) / `:3009` (prod) + `CHROMIUM_PATH` env.
+Currently test-app deps NOT refreshed — cannot run this gate without refreshing.
 
-## Files touched this session (working tree)
-- `packages/runtime/src/resource.ts` — slot helpers, sink→slot→flat get, owner-token set,
-  startRequest startToken capture, trackSsrPromise.
-- `packages/compiler/src/server-render.ts` — settleSsrPromises/pruneSsrDataSlots, token
-  reuse, settle-before-clear, slot merges, finally token+slot delete, render-trace.
-- `packages/adapter/src/dev-server.ts` — `/ssr-data.js` route, `body-trace`/`ssr-data-trace`,
-  doBuild passes plugins.
-- `scripts/e2e-setup.js` — passes `plugins` to `startDevServer`.
-- `packages/runtime/src/hydrate.ts` — has leftover `_hl`/`__vskHydLog` instrumentation
-  (cleanup pending).
-- `tests/hydration-test.mjs` — TEMP `[leak-debug]` patch (revert).
-- Modified unit tests (keep): `packages/runtime/src/resource.test.ts`,
-  `packages/compiler/src/integration.test.ts`.
-- Stray untracked probes/artifacts to delete at the end: `_marker-probe.mjs`,
-  `tests/.marker-probe.mjs`, `prod-count-probe.mjs`, `prod-dump.mjs`,
-  `prod-ssr-probe.mjs`, and review `packages/adapter/src/load-config.ts` /
-  `packages/adapter/src/load-config.test.ts` (untracked, dev-server imports
-  `@vesk/adapter/src/dev-config` — confirm whether a load-config module is actually
-  needed/committed or leftover).
-- Logs in `/tmp/opencode/`: `e2e-setup.log`, `devhyd2..devhyd8.log`, `build5..7.log`,
-  `prod2.html`, `glob2.css`.
+**Chromium:** `/data/data/com.termux/files/usr/bin/chromium-browser` (termux)
 
-## Suggested next steps (in order)
-1. **Kill the token-reuse hypothesis or prove it.** Add one trace inside
-   `renderFullPage` (server-render.ts) gated by `VESK_SSR_TRACE`: log the token at entry
-   (reused vs freshly generated), slot key count BEFORE merge, and `componentName`; add a
-   dev-server log of `url.pathname` for the failing request correlated by time. Then run
-   the FULL suite and watch what token the `/blog/hello-world` leak actually reuses and
-   where `posts` entered it. (Fastest path now — all plumbing already in place.)
-2. If not token reuse: instrument the client side of 18a (page.on('response') payload
-   capture was inconclusive server-side) — or bisect the precondition by commenting out
-   suite sections before TEST 18 (e.g. skip Test 12/13 SPA data-nav, skip /broken) until
-   the leak stops, to identify the triggering section.
-3. Independently fix the 6 runtime-export failures (verify `hydrateViewport`,
-   `hydrateIdle`, `hydrateOnInteraction`, `collectVskMarkers`, `createHydrateWalker` exist
-   in `packages/runtime/src/index-client.ts`; check adapter dev `buildRuntimeCode` export
-   list; add missing re-exports) — likely a separate, simpler bug.
-4. Re-run gates → expect 360/0 dev + 52/52 prod; then `node scripts/test.js`, typecheck.
-5. Cleanup pass (section "Instrumentation added this session"), delete probe files, update
-   TODO.md., and commit only if the user asks.
+**Probes:** `/tmp/opencode/scroll-test/` — all need
+`ln -s /root/vesk/node_modules /tmp/opencode/scroll-test/node_modules` (already exists).
+
+---
+
+## Next steps
+
+### 1. Fix the hero label ordering bug (the remaining blocker)
+
+The label badge renders before the text on the client after hydration. Debug path:
+
+**A. Verify SSR HTML matches expectation.**
+Already confirmed: text first, badge second. SSR is correct.
+
+**B. Trace the walker position across the `await` in the badge hydrate fn.**
+The badge hydrate fn (`__hydrators["VersionBadge"]`) does `await useFetch.json(...)`
+BEFORE calling `nextElement("span")`. The subWalker created by the parent
+(`__hydrate.subWalker(__hydrate.nextElement())`) should hold its cursor, but the
+`await` may cause the walker to be recreated or repositioned. Instrument the runtime
+`hydrate.ts` `nextElement()` / `subWalker()` to log the current walker position and
+the element being claimed.
+
+**C. Test with a sync badge (remove `await useFetch`).**
+Temporarily make VersionBadge sync (no useFetch, just `<span>v0.2.25</span>`) to
+confirm the ordering is correct when there's no async gap. If order is correct →
+the bug is specifically about async claim ordering in subWalker across await.
+
+**D. Check if `__hydrate.root` is the right element.**
+In `__hydrators["VersionBadge"]`: `const $root = __hydrate.root` — what is this?
+It's the walker's root for the subWalker. If the subWalker was created from the
+label's position, `$root` should be the `<span style="display:contents">` wrapper
+that SSR emitted for the VersionBadge component boundary. If `$root` is somehow
+the label span itself, the claim logic would reparent nodes incorrectly.
+
+**E. Look at `hydrate.ts` subWalker implementation.**
+`packages/runtime/src/hydrate.ts` — find `subWalker` and trace how the cursor is
+preserved/split. The test at `hydrate.test.ts:343-420` tests `display:contents`
+wrapper claiming — read it for expected behavior.
+
+**F. Compare the generated hydrate code for the FOOTER badge (which works) vs
+the HERO badge (which doesn't).**
+Footer badge (`page-index-new.js:62023`): `await __hydrators["VersionBadge"]({}, ...)`.
+Hero badge (`page-index-new.js:57620`): same call. But the PARENT context differs:
+Footer wraps badge in `<span>compiler <VersionBadge /></span>` (text THEN badge
+element, adjacent siblings). Hero wraps badge in
+`<span>compiler-first framework · <VersionBadge /></span>` (text then badge, with a
+`<!--vsk-->` comment marker in SSR between them). The comment marker may be the
+claim-positioning key — check if `nextElement` skips comments or if `<!--vsk-->`
+between text and element affects cursor state.
+
+### 2. Consider simplifying the async chain
+
+If the label ordering bug is deep in the hydration walker, a quick workaround:
+make VersionBadge NOT `async`, remove `await useFetch`, and fetch the version via a
+simple `useFetch` (ssrAwait mode) + render via `into: versionCell` where
+`const &[version] = track('')`. This makes the component sync on the client (no async
+claim ordering), while the server still bakes the data. The cost: the component body
+becomes reactive-imperative instead of declarative. Evaluate whether this tradeoff is
+acceptable.
+
+### 3. Run the full verification suite
+
+After the label-order fix:
+1. `npx tsx packages/compiler/src/client-codegen.test.ts` — 247+ passed
+2. Probe: `node /tmp/opencode/scroll-test/probe-badappend.mjs http://localhost:3000/`
+   — zero errors, BADGE: 3, label text reads `compiler-first framework · v0.2.25`
+3. `node /tmp/opencode/scroll-test/probe-label.mjs` — label `childNodes` order is
+   [TEXT:"compiler-first framework · ", EL:badge-wrapper]
+4. Refresh test-app deps + run production hydration gate (per AGENTS.md requirement
+   for reactivity/hydration changes)
+5. Commit to `bug` branch with message describing the label-order fix
+
+### 4. JSDoc for useFetch (nice-to-have)
+
+Add JSDoc to `packages/runtime/src/resource.ts`:
+- `UseFetchOptions<T>` fields: document `key`, `staleTime`, `keepPreviousData`,
+  `retry`, `retryDelay`, `timeout`, `enabled`, `dedupe`
+- `useFetch` function: describe the two forms (URL string vs fetcher function),
+  key deduplication, server/client handoff, PromiseLike behavior
+- `Resource<T>` interface: document `.loading`, `.error`, `.data`, `.refresh()`,
+  `.abort()`
+
+---
+
+## Prior session context (carried forward)
+
+- Scroll-on-refresh fix committed+pushed (`e68cd03` → origin/main, repo
+  `github.com/emeraldlinks/veskTs`).
+- `.vsk` is a superset of TypeScript; `useFetch` is auto-imported (compiler
+  auto-importable list).
+- `scripts/AGENTS.md` / `packages/runtime/AGENTS.md` / `packages/compiler/AGENTS.md`
+  all extend root `AGENTS.md` — read both when touching those areas.
+- TODO.md is the living task tracker — current focus: "hydrate-mode loop claiming,
+  async page 500" (the label-order bug may be related to hydrate-mode loop claiming).

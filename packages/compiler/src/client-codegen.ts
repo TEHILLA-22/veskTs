@@ -644,7 +644,11 @@ function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, T
 
   const propsObj = `{ ${propsEntries.join(', ')} }`;
   const v = ctx.n();
-  const awaitKw = ctx.asyncComps.has(node.componentName) ? 'await ' : '';
+  // Await children whenever the calling scope is async. Async-ness is
+  // parent-driven (mirroring the server side) so that imported async
+  // components from other files — whose names are not in the local
+  // asyncComps set — still resolve to nodes before append/insert.
+  const awaitKw = ctx.isAsyncScope ? 'await ' : '';
   // Member-expression tags (`<it.icon>`) carry the raw component-valued
   // expression — invoke it directly; it is never a registry name.
   const calleeExpr = node.calleeExpr ? `(${node.calleeExpr})` : null;
