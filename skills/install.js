@@ -2,18 +2,21 @@
 /**
  * Vesk skill installer — agent-agnostic.
  *
- * Installs the `vesk` skill (skills/vesk/SKILL.md) into every major AI
- * coding tool's native skill-discovery location. One source file, many
- * agents. Zero dependencies, ESM-only (NetworkNode >= 20).
+ * One source file, every major AI coding tool's native skill-discovery
+ * location. Installs the `vesk` and `react-to-vesk` skills
+ * (skills/<name>/SKILL.md) so every agent loads the *current* authoritative
+ * copy (including Recipe G's VeskRequest/VeskResponse API conversions).
+ * Zero dependencies, ESM-only (Node >= 20, no `node:` imports needed).
  *
  * Usage:
  *   node skills/install.js                # provision all detected platforms
  *   node skills/install.js <platform>     # provision one platform
  *   node skills/install.js --list         # show target paths
  *   node skills/install.js --all          # provision every platform (even absent)
+ *   node skills/install.js --force        # re-copy even if already present
  *
- * Platforms & their native discovery mechanisms (grounded in the Agent
- * Skills spec — https://agentskills.io):
+ * Platforms & their native skill-discovery mechanisms (grounded in the
+ * Agent Skills spec — https://agentskills.io):
  *   opencode       ~/.config/opencode/skills/<name>/SKILL.md          (global)
  *   claude-code    ~/.claude/skills/<name>/SKILL.md                   (global)
  *   copilot        ~/.copilot/skills/<name>/SKILL.md                  (global)
@@ -22,17 +25,19 @@
  *   cursor         .cursor/skills/<name>/SKILL.md                     (project)
  *   windsurf       .windsurf/skills/<name>/SKILL.md                   (project)
  *
- * Project-scoped tools are written into the current working directory so
- * the skill ships with the repo. Global-scoped tools use `$HOME`.
+ * Project-scoped skills are written into the current working directory so
+ * the skill ships with the repo. Global-scoped skills use `$HOME`.
  */
 import { existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const NAME = 'vesk';
+const SKILLS = [
+	{ name: 'vesk', src: 'skills/vesk/SKILL.md' },
+	{ name: 'react-to-vesk', src: 'skills/react-to-vesk/SKILL.md' },
+];
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SKILL_SRC = join(HERE, NAME, 'SKILL.md');
 const CWD = process.cwd();
 
 /**
@@ -86,16 +91,19 @@ function detectInstalled(platform) {
 }
 
 function install(platform, { force = false } = {}) {
-	const targetDir = platform.dir();
-	const skillDir = join(targetDir, NAME);
-	if (!force && existsSync(skillDir)) {
-		console.log(`  ${platform.name}: already installed at ${skillDir} (skip; --force to reinstall)`);
-		return false;
+	let installedAny = false;
+	for (const skill of SKILLS) {
+		const skillDir = join(platform.dir(), skill.name);
+		if (!force && existsSync(skillDir)) {
+			console.log(`  ${platform.name}: ${skill.name} already installed at ${skillDir} (skip; --force to reinstall)`);
+			continue;
+		}
+		mkdirSync(skillDir, { recursive: true });
+		copyFileSync(skill.src, join(skillDir, 'SKILL.md'));
+		console.log(`  ${platform.name} (${platform.scope}): ${join(skillDir, 'SKILL.md')}`);
+		installedAny = true;
 	}
-	mkdirSync(skillDir, { recursive: true });
-	copyFileSync(SKILL_SRC, join(skillDir, 'SKILL.md'));
-	console.log(`  ${platform.name} (${platform.scope}): ${join(skillDir, 'SKILL.md')}`);
-	return true;
+	return installedAny;
 }
 
 function main() {
@@ -110,13 +118,8 @@ function main() {
 			const installed = detectInstalled(p);
 			console.log(`  ${p.name.padEnd(12)} ${installed ? 'dir present' : 'dir absent '} -> ${p.dir()}`);
 		}
-		console.log(`\nSkill source: ${SKILL_SRC}`);
+		console.log(`\nSkill source: ${SKILLS.map((s) => s.name).join(', ')}`);
 		return;
-	}
-
-	if (!existsSync(SKILL_SRC)) {
-		console.error(`Skill not found at ${SKILL_SRC}. Run from the repo root.`);
-		process.exit(1);
 	}
 
 	const targets = args.filter((a) => !a.startsWith('--'));
@@ -134,7 +137,7 @@ function main() {
 		selected = all ? PLATFORMS : PLATFORMS.filter((p) => detectInstalled(p));
 	}
 
-	console.log(`Installing "${NAME}" skill:\n`);
+	console.log(`Installing Vesk skills:\n`);
 	let count = 0;
 	for (const p of selected) {
 		if (install(p, { force })) count++;
