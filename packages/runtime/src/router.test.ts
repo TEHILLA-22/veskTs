@@ -887,13 +887,15 @@ test('Link SSR does not emit the scrollBehavior prop as an attribute', () => {
 	}
 });
 
-test('start() restores the browser-scrolled position on refresh (createFileRouter)', () => {
+test('start() leaves the browser-scrolled position untouched on refresh (createFileRouter)', () => {
 	const container = document.createElement('div');
 	const tree = buildRouteTree([{ path: '/', page: () => document.createTextNode('Home') }]);
 	window.scrollY = 540; // browser restored this before hydration
 	try {
+		window._scrollCalls = [];
 		const router = createFileRouter(tree, { container });
 		router.start();
+		expect(window._scrollCalls.length).toBe(0);
 		expect(window.scrollY).toBe(540);
 	} finally {
 		window.scrollY = 0;
@@ -901,13 +903,15 @@ test('start() restores the browser-scrolled position on refresh (createFileRoute
 	}
 });
 
-test('start() restores the browser-scrolled position on refresh (createRouter)', () => {
+test('start() leaves the browser-scrolled position untouched on refresh (createRouter)', () => {
 	const container = document.createElement('div');
 	const routes = defineRoute({ path: '/', page: () => document.createTextNode('Home') });
 	window.scrollY = 320; // browser restored this before hydration
 	try {
+		window._scrollCalls = [];
 		const router = createRouter(routes, { container });
 		router.start();
+		expect(window._scrollCalls.length).toBe(0);
 		expect(window.scrollY).toBe(320);
 	} finally {
 		window.scrollY = 0;

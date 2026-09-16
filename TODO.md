@@ -4,6 +4,11 @@
 
 **Current phase:** pure-TS pipeline (haul parked)
 
+**Done this session — router scroll-on-refresh + Link/NavLink `scrollBehavior`:**
+- [x] **Refresh no longer jumps to top.** Root cause: `router.start()` set `window.history.scrollRestoration = 'manual'`, disabling the browser's native restore, while the refresh/hydration path never invoked `handleScroll` (so the capture-and-replay mechanism never ran). Fix: removed the `'manual'` override entirely — native `'auto'` restoration rebuilds on refresh and bfcache/back-forward, and `handleScroll` still scrolls to top on forward SPA navigations. Verified with puppeteer-core + termux chromium: deployed `vesk-docs.vercel.app` (old bundle) resets to 0; local `localhost:3000` vesk-doc dev server (fresh-tarball rebuilt runtime) restores scrollY exactly (3900 on `/`, 1274 on `/docs/components`) after real wheel-scroll + reload. Unit tests: 2 refresh tests now assert `start()` leaves the browser-restored position untouched (86 router tests green, repo typecheck clean).
+- [x] **`scrollBehavior` prop on Link/NavLink** (`auto` | `instant` | `smooth`; default `auto`). Threaded through `LinkProps`/`NavLinkProps`, all 4 click handlers, `useNavigate` opts, `Router`/`RouterInstance.navigate` opts, and `handleScroll`'s `window.scrollTo({ behavior })`. Not emitted as an SSR attribute. Updated `packages/runtime/llms.txt` and `packages/lsp/src/knowledge.ts` Link/NavLink entries.
+- [ ] **Verification note:** user's browser must hard-refresh (Ctrl+Shift+R) — `_vesk/client.js` from the pre-fix dev server is cached; the old 2023 `vesk dev` on `:3000` was killed and replaced.
+
 **Done this session — `tests/hydration-test.mjs` back to 360/360 + vesk-doc 11/11:**
 - [x] **§3 hydration wrapper fix** — `server-jsgen.ts` emits `<!--vsk--><span style="display:contents">` wrappers (closing tag matched); compiler server-codegen regression test added.
 - [x] **NavLink hydrate claim fix** — `router-components.ts` `__isHydrating` claimed the inner `<!--vsk--><a>` via the walker with `hydrate.root.querySelector('a')` fallback; router.test.ts +1 (77 total).

@@ -90,18 +90,6 @@ export const _state = {
 
 export const _scrollPositions = new Map<string, number>();
 export let _isPopStateNavigation = false;
-export let _initialScrollRestored = false;
-export let _initialSavedScroll = 0;
-
-/** Capture the browser's pre-hydration scroll position and re-arm the
- * one-shot initial restore. Called at the top of `router.start()` on a
- * fresh page load so a refresh lands back on the viewport the browser
- * had scrolled to instead of the top. */
-export function captureInitialScroll(): void {
-	if (typeof window === 'undefined') return;
-	_initialSavedScroll = window.scrollY || 0;
-	_initialScrollRestored = false;
-}
 
 export function setIsPopStateNavigation(v: boolean): void {
 	_isPopStateNavigation = v;
@@ -187,11 +175,6 @@ export function handleScroll(pathname: string, isReplace?: boolean, scrollBehavi
 		const savedY = _scrollPositions.get(pathname);
 		requestAnimationFrame(() => {
 			window.scrollTo({ top: savedY !== undefined ? savedY : 0, behavior });
-		});
-	} else if (isReplace && !_initialScrollRestored) {
-		_initialScrollRestored = true;
-		requestAnimationFrame(() => {
-			window.scrollTo({ top: _initialSavedScroll, behavior });
 		});
 	} else if (!isReplace) {
 		requestAnimationFrame(() => window.scrollTo({ top: 0, behavior }));

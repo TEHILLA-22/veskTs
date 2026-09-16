@@ -7,7 +7,6 @@ import type { RouteNode, RouteMatch } from '@vesk/runtime/src/router-match';
 import {
 	__isHydrating, setIsHydrating, _state, _scrollPositions,
 	_isPopStateNavigation, setIsPopStateNavigation, setCurrentRouter,
-	captureInitialScroll,
 	showLoadingInContainer, handleScroll, applyHead, findLoadingComponent,
 	findErrorComponent, findNotFoundComponent, findOfflineComponent,
 	findNetworkComponent, RouterCtx, getCurrentRouter,
@@ -1366,10 +1365,6 @@ export function createRouter(
 		start() {
 			setCurrentRouter(this);
 
-			if (typeof window !== 'undefined' && 'scrollRestoration' in window.history) {
-				captureInitialScroll();
-				window.history.scrollRestoration = 'manual';
-			}
 			if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
 				let _scrollTimer: ReturnType<typeof setTimeout> | null = null;
 				window.addEventListener('scroll', () => {
@@ -1721,10 +1716,6 @@ export function createFileRouter(routeTree: RouteNode[], options: FileRouterOpti
 		start() {
 			setCurrentRouter(this);
 
-			if (typeof window !== 'undefined' && 'scrollRestoration' in window.history) {
-				captureInitialScroll();
-				window.history.scrollRestoration = 'manual';
-			}
 			if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
 				let _scrollTimer: ReturnType<typeof setTimeout> | null = null;
 				const _onScroll = () => {
