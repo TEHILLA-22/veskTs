@@ -1596,7 +1596,14 @@ function generateComponent(comp: ComponentIR, importedNames: Set<string> = new S
   const paramInit = buildParamInit(comp.paramNames);
   if (paramInit) ctx.push(indent(paramInit));
 
+  // Hoist TrackDecls to top to avoid TDZ when Head/effects reference them before declaration
   for (const node of comp.body) {
+    if (node instanceof TrackDecl) {
+      emitNode(ctx, node, tracked, null);
+    }
+  }
+  for (const node of comp.body) {
+    if (node instanceof TrackDecl) continue;
     const v = emitNode(ctx, node, tracked, null);
     if (v) {
       if (ctx.hydrate) {
