@@ -15,7 +15,7 @@ component DocsPage(props: { params: { slug: string } }) {
 	const prev = neighbours.prev
 	const next = neighbours.next
 	const toc = doc.blocks.filter((b) => b.kind === "h2").map((b) => ({ id: headingId((b as any).text), text: (b as any).text }))
-
+  // app head
 	<Head>
 		<title>{doc.title} — Vesk Docs</title>
 		<meta name="description" content={doc.description} />
