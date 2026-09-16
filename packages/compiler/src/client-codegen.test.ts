@@ -1546,7 +1546,7 @@ describe('Client Codegen — While / Do-While / For / Switch Blocks', () => {
 		if (mode === 'hydrate') {
 			expect(code).toContain('__cl.push(');
 			expect(code).toContain('const __cl = [];');
-			expect(code).toContain('let $root = null');
+			expect(code).toContain('const $root = __hydrate.root;');
 		} else {
 			expect(code).toContain('document.createDocumentFragment();');
 			expect(code).not.toContain('__cl.push(');

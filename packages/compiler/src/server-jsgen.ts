@@ -32,14 +32,14 @@ import { localValueImportNames } from '@vesk/compiler/src/module-imports';
 // the client's for every property, not just sticky.
 //
 // The wrapper tag must be `<span>`, not `<div>`. The HTML parser implicitly
-// closes an open `<p>` on a flow-content start tag like `<div>`, so a `<div>`
-// wrapper inside a `<p>` (a component called inside a paragraph, e.g. a `Link`
-// in an eyebrow row) is hoisted out of the paragraph, stranding its `<!--vsk-->`
-// marker in the now-empty `<p>` → `nextElementSibling` is null → the hydration
-// claim misses and every later claim tag-shifts, wiping the SSR content. `<span>`
-// is phrasing content (legal inside `<p>`) and never triggers an implicit close,
-// while `display: contents` keeps it box-less everywhere a `<div>` would be.
-const HYDRATE_COMPONENT_WRAPPER = '<!--vsk--><span style="display:contents">';
+// Marker-ONLY component boundary. The client's shared walker claims a
+// component call-site by reading the component's own root element off this
+// marker — the SSR output of a component call is exactly `<!--vsk-->` followed
+// by the callee's content. A `<span style="display:contents">` box here would
+// sit between the marker and that root, so a `nextElement(tag)` claim (e.g.
+// LoadingIndicator claiming `div`) hits a tag mismatch, never advances the
+// walker cursor, and every later claim miss wipes the SSR content.
+const HYDRATE_COMPONENT_WRAPPER = '<!--vsk-->';
 
 export function irNodeToJS(node: IRNode, importedNames?: Set<string> | null, isAsync: boolean = false, tracked?: Map<string, TrackedInfo>): string {
   importedNames = importedNames || __vskImportedNames;
@@ -441,9 +441,7 @@ function componentCallToJS(node: ComponentCall, importedNames: Set<string> | nul
   lines.push(`const ${calleeVar} = ${callee};`);
   const callExpr = `${awaitKw}${calleeVar}(${propsObj}, __registry, (${calleeVar}.__veskScope || __vesk))`;
   if (__vskHydrate) {
-    // Wrapper purpose documented at HYDRATE_COMPONENT_WRAPPER; it must never
-    // become a layout box (see the constant's comment for why).
-    lines.push(`__out.push(${JSON.stringify(HYDRATE_COMPONENT_WRAPPER)} + (${callExpr} || '') + '</span>');`);
+    lines.push(`__out.push(${JSON.stringify(HYDRATE_COMPONENT_WRAPPER)} + (${callExpr} || ''));`);
   } else {
     lines.push(`__out.push(${callExpr} || '');`);
   }

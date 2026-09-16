@@ -1429,40 +1429,42 @@ describe('Sub-Component Static Extraction', () => {
 });
 
 // ============================================================
-// Hydrate component-boundary wrapper is layout-inert
+// Hydrate component-call boundary is marker-only
 // ============================================================
 describe('Hydrate component-call wrapper', () => {
 
-	it('expression mode: boundary wrapper carries display:contents', () => {
+	it('expression mode: boundary is marker-only (no box before component root)', () => {
 		const html = render(`
 			component Nav { return <header class="sticky top-0">Hi</header>; }
 			component App { return <Nav />; }
 		`, 'App', {}, new Map(), { hydrate: true });
-		// The component root that the hydration walker adopts must not confine
-		// sticky/height/inset-relative children to the component's own bounds,
-		// or SSR layout diverges from the client (which appends into the parent).
-		expect(html).toBe('<!--vsk--><span style="display:contents"><header class="sticky top-0">Hi</header></span>');
+		// The component call-site renders exactly `<!--vsk-->` + the callee's
+		// own root. No `<span style="display:contents">` box may sit between
+		// marker and root: the hydration walker's claim reads the root directly
+		// off the marker, and a box in between tag-mismatches the claim
+		// (nextElement('div') hitting a span), freezing the walker cursor.
+		expect(html).toBe('<!--vsk--><header class="sticky top-0">Hi</header>');
 	});
 
-	it('statement mode: bare JSX child gets the same layout-inert wrapper', () => {
+	it('statement mode: bare JSX child gets the same marker-only boundary', () => {
 		const html = render(`
 			component Nav { <header class="sticky top-0">Hi</header> }
 			component App { <Nav /> }
 		`, 'App', {}, new Map(), { hydrate: true });
-		expect(html).toBe('<!--vsk--><span style="display:contents"><header class="sticky top-0">Hi</header></span>');
+		expect(html).toBe('<!--vsk--><header class="sticky top-0">Hi</header>');
 	});
 
-	it('fragment roots stay inside one shared wrapper (display:contents keeps them claimable)', () => {
+	it('fragment roots share one call-site marker, no shared container', () => {
 		const html = render(`
 			component Split { <header>Top</header> <nav>Nav</nav> }
 			component App { <Split /> }
 		`, 'App', {}, new Map(), { hydrate: true });
-		// Both roots must share a single container so subWalker(rootEl).contains
-		// covers markers under every root — but that container is layout-inert.
-		expect(html).toBe('<!--vsk--><span style="display:contents"><header>Top</header><nav>Nav</nav></span>');
+		// Marker-only boundary: multiple statement-mode roots still claim
+		// directly off the shared walker; no layout wrapper is introduced.
+		expect(html).toBe('<!--vsk--><header>Top</header><nav>Nav</nav>');
 	});
 
-	it('component inside a <p> keeps the wrapper inside the paragraph (span, not div)', () => {
+	it('component inside a <p> keeps its marker inside the paragraph', () => {
 		const html = render(`
 			component Linkish { <a href="/docs" class="hover:text-foreground no-underline text-muted-foreground">docs</a> }
 			component App {
@@ -1473,13 +1475,10 @@ describe('Hydrate component-call wrapper', () => {
 				</p>
 			}
 		`, 'App', {}, new Map(), { hydrate: true });
-		// A `<div>` wrapper inside a `<p>` is invalid HTML: the parser implicitly
-		// closes the `<p>` at the `<div>`, hoisting the link out of the paragraph
-		// and leaving its claim marker stranded in the now-empty `<p>` — every
-		// later hydration claim then tag-shifts and the SSR content is wiped.
-		// The wrapper must be a `<span>`, which is phrasing content (legal inside
-		// a `<p>`) and never triggers an implicit close during SSR-body parsing.
-		expect(html).toBe('<!--vsk--><p class="eyebrow mb-4 flex items-center gap-2"><!--vsk--><span style="display:contents"><a href="/docs" class="hover:text-foreground no-underline text-muted-foreground">docs</a></span><span aria-hidden>/</span><span>Language</span></p>');
+		// The marker-only boundary is `<!--vsk--><a …>docs</a>` — the marker
+		// precedes phrasing content (`<a>`), which never triggers an implicit
+		// `<p>` close, so SSR-body parsing keeps the marker in the paragraph.
+		expect(html).toBe('<!--vsk--><p class="eyebrow mb-4 flex items-center gap-2"><!--vsk--><a href="/docs" class="hover:text-foreground no-underline text-muted-foreground">docs</a><span aria-hidden>/</span><span>Language</span></p>');
 	});
 
 	it('non-hydrate mode emits no wrapper element', () => {

@@ -1533,7 +1533,7 @@ component App {
   return <Md content="### Hi" />;
 }`;
   const r = renderPage(source, 'App', {}, new Map(), { hydrate: true }) as { body: string };
-  assert(r.body.startsWith('<!--vsk--><span style="display:contents"><div class="vesk-md">'), `hydrate wrapper missing: ${r.body}`);
+  assert(r.body.startsWith('<!--vsk--><div class="vesk-md">'), `hydrate marker missing: ${r.body}`);
   assert(r.body.includes('<h3 id="hi">Hi</h3>'), `markdown missing in hydrate output: ${r.body}`);
 });
 
@@ -1545,7 +1545,7 @@ component App {
   const code = compileClient(source, 'App', { hydrate: true });
   assert(code.includes(`import { Md } from '@vesk/runtime'`), `Md import dropped: ${code.slice(0, 400)}`);
   assert(code.includes('Md({'), `Md not called: ${code.slice(0, 600)}`);
-  assert(code.includes('subWalker('), `hydrate walker not passed to Md: ${code.slice(0, 600)}`);
+  assert(/Md\(\{[^}]*\}, __registry, __hydrate\)/.test(code), `hydrate walker not passed to Md: ${code.slice(0, 600)}`);
 });
 
 it('[md][expr] dynamic content from a track cell renders', () => {

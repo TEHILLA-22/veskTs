@@ -349,7 +349,7 @@ test('Link hydrate adopts SSR anchor without duplicating children', () => {
 	ssrRoot.querySelector = () => ssrA;
 	const frag = document.createDocumentFragment();
 	frag.appendChild(document.createTextNode('quickstart'));
-	const walker = { root: ssrRoot, nextElement(tag) { return document.createElement(tag || 'a'); } };
+	const walker = { root: ssrRoot, nextElement(tag) { return tag === 'a' ? ssrA : document.createElement(tag); } };
 	const out = Link({ href: '/docs/getting-started', class: 'x', children: frag }, undefined, walker);
 	expect(ssrA.children.length).toBe(1);
 	expect(ssrA.textContent).toBe('quickstart');
