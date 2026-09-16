@@ -1584,10 +1584,7 @@ function generateComponent(comp: ComponentIR, importedNames: Set<string> = new S
   }
 
   if (ctx.hydrate) {
-    // Direct claiming: the component claims its own SSR root via the shared
-    // walker. The first element the body emits IS the root; there is no
-    // wrapper element to return.
-    ctx.push(indent(`let $root = null;`));
+    ctx.push(indent(`const $root = __hydrate.root;`));
   } else {
     ctx.push(indent(`const $root = document.createDocumentFragment();`));
   }
@@ -1607,8 +1604,7 @@ function generateComponent(comp: ComponentIR, importedNames: Set<string> = new S
     const v = emitNode(ctx, node, tracked, null);
     if (v) {
       if (ctx.hydrate) {
-        ctx.push(indent(`if ($root === null) $root = ${v};`));
-        ctx.push(indent(`if (${v} !== $root && ${v}.parentNode == null) $root.appendChild(${v});`));
+        ctx.push(indent(`if (${v}.parentNode !== $root) { if (!$root || ${v}.parentNode == null || !${v}.parentNode.contains(${v})) $root.appendChild(${v}); }`));
       } else {
         ctx.push(indent(`$root.appendChild(${v});`));
       }
@@ -1621,9 +1617,6 @@ function generateComponent(comp: ComponentIR, importedNames: Set<string> = new S
   const delCode = ctx.emitDelegates();
   if (delCode) ctx.push(indent(delCode.trim()));
 
-  if (ctx.hydrate) {
-    ctx.push(indent(`if ($root === null) $root = document.createDocumentFragment();`));
-  }
   ctx.push(indent(`return __pendingChild || $root;`));
   ctx.push(indent(`} finally {`));
   ctx.push(indent(`\tsetActiveComponent(__prev);`));
