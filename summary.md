@@ -2,9 +2,7 @@
 
 ## Objective
 
-Make the `@vesk/compiler` version badge live from npm in vesk-doc: replace hardcoded
-`v0.2.16` with the real latest registry version (currently `0.2.25`), fully working in
-SSR-baked HTML and client hydration, with zero console errors.
+Make wrapper-free hydration work on full refresh / SPA navigation, and fix hydration regression that caused `HierarchyRequestError` from Lucide icons and stray `Link` fallback rewiring. Verify `effect()` works in both expression and statement mode and pass the hydration gate `tests/hydration-test.mjs`.
 
 ## What's working and verified
 

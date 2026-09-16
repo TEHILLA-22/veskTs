@@ -105,19 +105,88 @@ describe('Client Codegen — DOM Creation', () => {
 		}
 	});
 
-	// Fragment — statement + expression mode (via JSX <></>)
+// Fragment — statement + expression mode (via JSX <></>). Fully static
+	// fragments stay as-is on hydration (claimOnly stub); the static content
+	// is preserved with no re-render.
 	bothModes('uses fragment expression mode', `
 		component App { return <><div>A</div><div>B</div></>; }
 	`, (code, mode) => {
 		if (mode === 'normal') expect(code).toContain('DocumentFragment');
-		else expect(code).toContain('__hydrate.root');
+		else expect(code).toContain('__hydrate.claimOnly()');
 	});
 	bothModes('uses fragment statement mode', `
 		component App { <div>A</div><div>B</div> }
 	`, (code, mode) => {
 		if (mode === 'normal') expect(code).toContain('DocumentFragment');
-		else expect(code).toContain('__hydrate.root');
+		else expect(code).toContain('__hydrate.claimOnly()');
 	});
+});
+
+describe('Client Codegen — Hydrate call-site boundaries', () => {
+
+	// SSR emits `<!--vsk-->` marker + the component's own root; no
+	// display:contents wrapper anywhere.
+	bothModes('component call emits no wrapper element', `
+		component Nav { return <header class="sticky">Hi</header>; }
+		component App { return <Nav />; }
+	`, (code, mode) => {
+		if (mode === 'normal') expect(code).toContain('document.createElement');
+		else {
+			expect(code).not.toContain('display:contents');
+			expect(code).not.toContain('subWalker(');
+		}
+	});
+
+	// Genuinely-plain call targets (non-runtime imports, member-expression tags,
+	// top-level values) never touch the walker — the call site adopts their SSR
+	// root after the call and replaces it with the fresh node they returned.
+	bothModes('plain call target gets the adoption guard', `
+		const Icon = (props) => null;
+		component App { <div><Icon /></div> }
+	`, (code, mode) => {
+		if (mode === 'normal') {
+			expect(code).toContain('Icon({');
+			expect(code).not.toContain('claimOnly');
+		} else {
+			expect(code).toContain('Icon({');
+			expect(code).toContain('claimOnly()');
+		}
+	});
+
+	// Runtime components that adopt their own SSR root (Link/NavLink/Md/Form/
+	// Field/LoadingIndicator) get NO adoption guard: they return a
+	// DocumentFragment when claimed, so the guard would steal the next
+	// sibling's root. Their destroyed interior markers are swept instead.
+	bothModes('self-claiming runtime component has no guard but sweeps detached markers', `
+		import { Link } from '@vesk/runtime';
+		const &[n] = track(1);
+		component App { <Link href="/"><b>{n}</b></Link><p>after</p> }
+	`, (code, mode) => {
+		if (mode === 'normal') {
+			expect(code).not.toContain('retireDetached');
+			return;
+		}
+		expect(code).toContain('Link({');
+		expect(code).not.toContain('claimOnly');
+		expect(code).toContain('retireDetached()');
+		// The sibling claim keeps walking the SHARED walker (no subWalker).
+		expect(code).not.toContain('subWalker(');
+	});
+
+	bothModes('Md call has no guard and claims its own root', `
+		import { Md } from '@vesk/runtime';
+		component App { return <Md content="# Hi" />; }
+	`, (code, mode) => {
+		if (mode === 'normal') {
+			expect(code).toContain('Md({');
+			expect(code).not.toContain('retireDetached');
+			return;
+		}
+		expect(code).toContain('Md({');
+		expect(code).not.toContain('claimOnly');
+		expect(code).toContain('retireDetached()');
+	});
+
 });
 
 describe('Client Codegen — Reactivity', () => {
@@ -424,6 +493,61 @@ describe('Client Codegen — layout slot scoping & claimed-sibling appends', () 
 			expect(code).toContain('parentNode !== $n');
 		} else {
 			expect(code).not.toContain('parentNode !== $n');
+		}
+	});
+
+	// Fresh static/dynamic text inside a claimed element that also holds SSR
+	// element children (a component-boundary wrapper) must be inserted at its
+	// SSR position — before the residue — not blindly appended at the end
+	// (the hero `compiler-first framework · <VersionBadge />` label reorders
+	// badge-before-text without this). Verify the codegen slots the text
+	// before `el.__vsk_ssrEls[0]` in hydrate mode and stays plain in normal
+	// mode.
+	bothModes('text before a component boundary is inserted before the SSR residue', `
+		component X() { return <i>x</i>; }
+		component P() {
+			<span class="label">compiler-first framework · <X /></span>
+		}
+	`, (code, mode) => {
+		if (mode === 'hydrate') {
+			expect(code).toContain('__vsk_ssrEls');
+			expect(code).toContain('insertBefore');
+			expect(code).toContain('__ssr[0]');
+		} else {
+			expect(code).not.toContain('__vsk_ssrEls');
+		}
+	});
+
+	// Interleaved text + static elements + component: each fresh text node
+	// slots before the residue that follows it ('a' before ssr[0], 'c' before
+	// ssr[1]; the final 'd' has no following residue so it appends).
+	bothModes('interleaved text slots between SSR residues in source order', `
+		component X() { return <i>x</i>; }
+		component P() {
+			<p>a <b>bold</b> c <X /> d</p>
+		}
+	`, (code, mode) => {
+		if (mode === 'hydrate') {
+			expect(code).toContain('__ssr[0]');
+			expect(code).toContain('__ssr[1]');
+			expect(code).toContain('appendChild');
+		} else {
+			expect(code).not.toContain('__vsk_ssrEls');
+		}
+	});
+
+	// Dynamic text does the same positional insert — reactivity keeps writing
+	// to the same (correctly positioned) node.
+	bothModes('dynamic text before a component slots before the SSR residue', `
+		component X() { return <i>x</i>; }
+		component P() {
+			let &[v] = track('hi');
+			<span>{v}<X /></span>
+		}
+	`, (code, mode) => {
+		if (mode === 'hydrate') {
+			expect(code).toContain('insertBefore');
+			expect(code).toContain('__ssr[0]');
 		}
 	});
 
@@ -1422,7 +1546,7 @@ describe('Client Codegen — While / Do-While / For / Switch Blocks', () => {
 		if (mode === 'hydrate') {
 			expect(code).toContain('__cl.push(');
 			expect(code).toContain('const __cl = [];');
-			expect(code).not.toContain('document.createDocumentFragment();');
+			expect(code).toContain('let $root = null');
 		} else {
 			expect(code).toContain('document.createDocumentFragment();');
 			expect(code).not.toContain('__cl.push(');

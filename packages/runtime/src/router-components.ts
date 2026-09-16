@@ -272,10 +272,6 @@ export function Link(
 	const href = props.href || '#';
 	if (hydrate && hydrate.nextElement) {
 		let a = hydrate.nextElement('a') as HTMLAnchorElement;
-		if (a && !a.parentNode && hydrate.root) {
-			const existing = hydrate.root.querySelector('a');
-			if (existing) a = existing as HTMLAnchorElement;
-		}
 		// The claimed SSR anchor is already attached in place; returning it lets
 		// compiled call sites re-insert it and duplicate the element. Keep it
 		// claimed and return an inert fragment. Only a genuinely fresh anchor
