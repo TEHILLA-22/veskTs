@@ -1,3 +1,5 @@
+import { VersionBadge } from './VersionBadge.vsk'
+
 const columns = [
   {
     title: "Product",
@@ -38,7 +40,7 @@ const columns = [
    },
 ]
 
-export component Footer {
+export async component Footer {
   <footer class="bg-background">
     <div class="mx-auto w-full max-w-6xl px-5 py-12 sm:px-8 sm:py-16">
       <div class="grid gap-10 lg:grid-cols-[1.2fr_2fr]">
@@ -93,7 +95,7 @@ export component Footer {
         class="mt-12 flex flex-col gap-2 border-t border-border pt-5 font-mono text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between"
       >
         <span>© 2026 Vesk · a compiler-first application framework</span>
-        <span>compiler v0.2.16</span>
+        <span>compiler <VersionBadge /></span>
         <p>Joseph Christopher (emeraldlinks)</p>
       </div>
     </div>

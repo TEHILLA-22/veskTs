@@ -126,6 +126,7 @@ function makeNode(type, tag) {
     if (i !== -1) { node.childNodes.splice(i, 1); c.parentNode = null; }
     return c;
   };
+  node.replaceChild = (c, old) => { node.insertBefore(c, old); node.removeChild(old); return c; };
   node.remove = () => { if (node.parentNode) node.parentNode.removeChild(node); };
   node.contains = (other) => {
     for (let n = other; n; n = n.parentNode) if (n === node) return true;
@@ -359,52 +360,49 @@ describe('createHydrateWalker', () => {
     cleanupDocument();
   });
 
-  it('claims a plain JS component root inside an empty boundary subWalker (lucide SSR shape)', () => {
+  it('claims a plain JS component root on the shared walker (lucide SSR shape)', () => {
     mockDocument();
     const root = document.createElement('div');
-    const mBox = document.createComment('vsk');
-    const box = document.createElement('span');
-    box.setAttribute('style', 'display:contents');
+    const m = document.createComment('vsk');
     const svg = document.createElement('header');
     svg.setAttribute('class', 'lucide lucide-menu');
-    box.appendChild(svg);
-    root.appendChild(mBox);
-    root.appendChild(box);
+    root.appendChild(m);
+    root.appendChild(svg);
 
     const walker = createHydrateWalker(root);
-    const boxClaim = walker.nextElement();
-    expect(boxClaim).toBe(box);
-    const sub = walker.subWalker(box);
-    // Plain JS components emit NO interior `<!--vsk-->` marker; the sub-walker
-    // must still claim the SSR root in place (positional fallback) rather than
-    // fresh-creating a duplicate that orphans the SSR node inside the wrapper.
-    const svgClaim = sub.nextElement('header');
-    expect(svgClaim).toBe(svg);
+    // Plain JS components emit no interior markers; the callsite's replacement
+    // guard adopts the SSR root via claimOnly() and swaps the fresh node in.
+    const fresh = document.createElement('nav');
+    const sr = walker.claimOnly();
+    expect(sr).toBe(svg);
     expect(svg.hasAttribute('data-vsk-claimed')).toBe(true);
-    expect(box.contains(svgClaim)).toBe(true);
+    expect(svg.parentNode).toBe(root);
+    root.replaceChild(fresh, sr);
+    expect(root.contains(fresh)).toBe(true);
+    expect(root.contains(svg)).toBe(false);
+    const leftover = root.childNodes.filter((n) => n.nodeType === 8);
+    expect(leftover.length).toBe(0);
     cleanupDocument();
   });
 
-  it('claims a second plain JS child from the same empty boundary subWalker', () => {
+  it('claims sibling roots on the same shared walker after a plain JS component', () => {
     mockDocument();
     const root = document.createElement('div');
-    const mBox = document.createComment('vsk');
-    const box = document.createElement('span');
-    box.setAttribute('style', 'display:contents');
+    const m1 = document.createComment('vsk');
     const a = document.createElement('div');
+    const m2 = document.createComment('vsk');
     const b = document.createElement('div');
-    box.appendChild(a);
-    box.appendChild(b);
-    root.appendChild(mBox);
-    root.appendChild(box);
+    root.appendChild(m1);
+    root.appendChild(a);
+    root.appendChild(m2);
+    root.appendChild(b);
 
     const walker = createHydrateWalker(root);
-    walker.nextElement();
-    const sub = walker.subWalker(box);
-    const aClaim = sub.nextElement('div');
-    const bClaim = sub.nextElement('div');
-    expect(aClaim).toBe(a);
-    expect(bClaim).toBe(b);
+    // First root taken by the plain component's claimOnly guard…
+    expect(walker.claimOnly()).toBe(a);
+    // …the next sibling component claims its own root positionally.
+    expect(walker.claimOnly()).toBe(b);
+    expect(root.childNodes.filter((n) => n.nodeType === 8).length).toBe(0);
     cleanupDocument();
   });
 
@@ -484,6 +482,135 @@ describe('createHydrateChildWalker', () => {
     const walker = createHydrateChildWalker({ children: [], childNodes: [] });
     const sub = walker.subWalker({ children: [], childNodes: [] });
     expect(typeof sub.nextElement).toBe('function');
+  });
+});
+
+describe('SSR element residue capture (text/component ordering)', () => {
+  it('adoptElement captures direct SSR element children on the claimed element', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const mLbl = document.createComment('vsk');
+    const label = document.createElement('span');
+    label.appendChild(document.createTextNode('compiler-first framework \u00B7 '));
+    const mW = document.createComment('vsk');
+    const badge = document.createElement('span');
+    badge.appendChild(document.createTextNode('v0.2.25'));
+    label.appendChild(mW);
+    label.appendChild(badge);
+    root.appendChild(mLbl);
+    root.appendChild(label);
+
+    const walker = createHydrateWalker(root);
+    const claim = walker.nextElement('span');
+    expect(claim).toBe(label);
+    // SSR text stripped, residue captured in DOM order.
+    expect((label.childNodes).filter((n) => n.nodeType === 3).length).toBe(0);
+    const residue = label.__vsk_ssrEls;
+    expect(residue.length).toBe(1);
+    expect(residue[0]).toBe(badge);
+    // The codegen re-creates the text node and slots it BEFORE the residue.
+    const freshText = document.createTextNode('compiler-first framework \u00B7 ');
+    if (0 < residue.length) label.insertBefore(freshText, residue[0]); else label.appendChild(freshText);
+    // Component claim keeps the residue root in place.
+    const badgeClaim = walker.nextElement('span');
+    expect(badgeClaim).toBe(badge);
+    expect(badgeClaim.hasAttribute('data-vsk-claimed')).toBe(true);
+    // Final order: text first, badge root second (the label-order bug).
+    const kinds = (label.childNodes).map((n) => (n.nodeType === 3 ? 'T' : n.nodeType === 1 ? 'E' : 'C'));
+    expect(kinds.join('')).toBe('TE');
+    cleanupDocument();
+  });
+
+  it('interleaved text slots between multiple residues in source order', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const mP = document.createComment('vsk');
+    const p = document.createElement('p');
+    p.appendChild(document.createTextNode('a '));
+    const b = document.createElement('b');
+    b.appendChild(document.createTextNode('bold'));
+    p.appendChild(b);
+    p.appendChild(document.createTextNode(' c '));
+    const mW = document.createComment('vsk');
+    const badge = document.createElement('span');
+    badge.appendChild(document.createTextNode('v0.2.25'));
+    p.appendChild(mW);
+    p.appendChild(badge);
+    p.appendChild(document.createTextNode(' d'));
+    root.appendChild(mP);
+    root.appendChild(p);
+
+    const walker = createHydrateWalker(root);
+    const claim = walker.nextElement('p');
+    expect(claim).toBe(p);
+    const residue = p.__vsk_ssrEls;
+    expect(residue.length).toBe(2);
+    expect(residue[0]).toBe(b);
+    expect(residue[1]).toBe(badge);
+
+    const kind = (n) => (n.nodeType === 3 ? 'T' : n.nodeType === 1 ? 'E' : 'C');
+    const insert = (text, idx) => {
+      const fresh = document.createTextNode(text);
+      if (typeof idx === 'number' && idx < residue.length) p.insertBefore(fresh, residue[idx]); else p.appendChild(fresh);
+    };
+    insert('a ', 0);
+    insert(' c ', 1);
+    insert(' d', undefined);
+    // Claiming the badge root consumes its preceding SSR marker.
+    const badgeClaim2 = walker.nextElement('span');
+    expect(badgeClaim2).toBe(badge);
+    expect(p.childNodes.filter((n) => n.nodeType === 8).length).toBe(0);
+    expect((p.childNodes).map(kind).join('')).toBe('TETET');
+    expect((p.childNodes).filter((n) => n.nodeType === 3).map((n) => n.data).join('')).toBe('a  c  d');
+    cleanupDocument();
+  });
+
+  it('createHydrateChildWalker captures residues when claiming wrapper children', () => {
+    mockDocument();
+    const parent = { children: [], childNodes: [] };
+    const wrap = document.createElement('span');
+    const inner = document.createElement('span');
+    inner.appendChild(document.createTextNode('v0.2.25'));
+    wrap.appendChild(inner);
+    parent.children.push(wrap);
+
+    const walker = createHydrateChildWalker(parent);
+    const claimed = walker.nextElement('span');
+    expect(claimed).toBe(wrap);
+    expect(wrap.__vsk_ssrEls.length).toBe(1);
+    expect(wrap.childNodes.filter((n) => n.nodeType === 3).length).toBe(0);
+    cleanupDocument();
+  });
+});
+
+describe('retireDetached sweeps wiped markers', () => {
+  it('skips a detached marker so the next claim stays aligned', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const m1 = document.createComment('vsk');
+    const a = document.createElement('div');
+    const m2 = document.createComment('vsk');
+    const b = document.createElement('div');
+    const m3 = document.createComment('vsk');
+    const c = document.createElement('div');
+    root.appendChild(m1); root.appendChild(a);
+    root.appendChild(m2); root.appendChild(b);
+    root.appendChild(m3); root.appendChild(c);
+
+    const walker = createHydrateWalker(root);
+    expect(walker.claimOnly()).toBe(a);
+
+    // A wipe-style component (Link) removed my interior marker from the DOM.
+    m2.remove();
+
+    // Without the sweep this claim would adopt nothing and build fresh;
+    // retireDetached lets the cursor skip the orphaned marker.
+    walker.retireDetached();
+    const claimedC = walker.claimOnly();
+    expect(claimedC).toBe(c);
+    expect(claimedC.hasAttribute('data-vsk-claimed')).toBe(true);
+    expect(root.childNodes.filter((n) => n.nodeType === 8).length).toBe(0);
+    cleanupDocument();
   });
 });
 
@@ -642,6 +769,74 @@ describe('walker marker lifecycle state machine', () => {
 		expect(mD1.parentNode).toBe(null);
 		// Next item root claim still resolves.
 		expect(walker.claimByKey('2').el).toBe(li2);
+		cleanupDocument();
+	});
+
+	it('double markers on the same element retire: a second claim never adopts a claimed node', () => {
+		mockDocument();
+		// Marker-only SSR can leave TWO `<!--vsk-->` marks before one element
+		// (the call-site marker + the runtime callee's own root marker, e.g.
+		// Link self-prefixes `<!--vsk-->`). The first claim adopts the element;
+		// the dead alias must be retired WITHOUT re-adopting (double-adoption
+		// strips SSR text a second time and desyncs every later claim).
+		const a1 = makeNode(1, 'a');
+		const a2 = makeNode(1, 'a');
+		const mCall1 = document.createComment('vsk');
+		const mLink1 = document.createComment('vsk');
+		const mCall2 = document.createComment('vsk');
+		const root = document.createElement('nav');
+		root.appendChild(mCall1); root.appendChild(mLink1); root.appendChild(a1);
+		root.appendChild(mCall2); root.appendChild(a2);
+		const walker = createHydrateWalker(root, [mCall1, mLink1, mCall2]);
+
+		// First link claims its anchor via the call-site marker.
+		const first = walker.nextElement('a');
+		expect(first).toBe(a1);
+		expect(a1.getAttribute('data-vsk-claimed')).toBe('');
+		// The callee's own marker still points at the SAME anchor: it must be
+		// retired, not adopted again.
+		const second = walker.nextElement('a');
+		expect(second).toBe(a2);
+		expect(a2.getAttribute('data-vsk-claimed')).toBe('');
+		// Canary: the dead alias is gone (no unclaimed marker survives on a1).
+		expect(mLink1.parentNode).toBe(null);
+		cleanupDocument();
+	});
+
+	it('claimOnly also retires dead alias markers behind an adopted element', () => {
+		mockDocument();
+		const div1 = makeNode(1, 'div');
+		const div2 = makeNode(1, 'div');
+		const mCall = document.createComment('vsk');
+		const mSelf = document.createComment('vsk');
+		const mNext = document.createComment('vsk');
+		const root = document.createElement('main');
+		root.appendChild(mCall); root.appendChild(mSelf); root.appendChild(div1);
+		root.appendChild(mNext); root.appendChild(div2);
+		const walker = createHydrateWalker(root, [mCall, mSelf, mNext]);
+
+		const claimed = walker.claimOnly('div');
+		expect(claimed).toBe(div1);
+		// Dead alias retired; next claim advances to the real sibling.
+		expect(walker.claimOnly('div')).toBe(div2);
+		cleanupDocument();
+	});
+
+	it('a trailing alias marker is swept so it never lingers in the DOM', () => {
+		mockDocument();
+		// Last link in a loop: its call-site marker is claimed, and its own
+		// marker aliases the same anchor with no further claim to retire it.
+		// The sweep after adoption must remove it immediately.
+		const a = makeNode(1, 'a');
+		const mCall = document.createComment('vsk');
+		const mLink = document.createComment('vsk');
+		const root = document.createElement('nav');
+		root.appendChild(mCall); root.appendChild(mLink); root.appendChild(a);
+		const walker = createHydrateWalker(root, [mCall, mLink]);
+
+		expect(walker.nextElement('a')).toBe(a);
+		expect(mCall.parentNode).toBe(null);
+		expect(mLink.parentNode).toBe(null); // trailing alias swept, not left behind
 		cleanupDocument();
 	});
 });

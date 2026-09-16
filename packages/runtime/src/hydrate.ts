@@ -31,6 +31,20 @@ export interface HydrateWalker {
 	root: HTMLElement | null;
 	done(): boolean;
 	nextElement(tag?: string): Element;
+	/**
+	 * Claim an element like `nextElement` but without stripping its direct text
+	 * children. Used by static-component stubs whose SSR content is preserved
+	 * as-is (no client-side re-creation of text nodes).
+	 */
+	claimOnly?(tag?: string): Element;
+	/**
+	 * Drop any remaining markers whose comment node is no longer attached to
+	 * the document. Self-claiming runtime components (Link/NavLink/Md/Form/
+	 * Field/LoadingIndicator) rebuild or wipe their SSR content on hydration,
+	 * which can remove comment markers that the shared walker still holds; the
+	 * sweep lets the cursor skip them so following sibling claims stay aligned.
+	 */
+	retireDetached?(): void;
 	subWalker(rootEl: HTMLElement): HydrateWalker;
 	/**
 	 * Claim the SSR element of a keyed list item whose `data-vsk-key` matches
@@ -126,6 +140,17 @@ function stripDirectTextNodes(el: Element): void {
 	}
 }
 
+// After a claim, a claimed element may still contain direct SSR element
+// children: component-boundary wrappers (`display:contents` spans) and static
+// markup that hydration skips. Fresh text/dynamic nodes re-created client-side
+// must be inserted BEFORE these residues at their SSR positions — appending at
+// the end would reorder mixed text + component children (e.g. a label that
+// reads `<span>compiler-first framework · <VersionBadge /></span>`). Store the
+// residue list (in DOM order) on the element so codegen can address it.
+function captureSsrElementChildren(el: Element): void {
+	(el as unknown as { __vsk_ssrEls?: Element[] }).__vsk_ssrEls = Array.prototype.slice.call(el.children);
+}
+
 /**
  * Dev-mode check that every `<!--vsk-->` marker in `container` has been
  * claimed by the most recent full hydration pass. Markers that remain belong
@@ -210,6 +235,22 @@ function adoptElement(marker: Comment, tag?: string): Element | null {
 	if (tag && el.tagName.toLowerCase() !== tag) return null;
 	marker.remove();
 	stripDirectTextNodes(el);
+	captureSsrElementChildren(el);
+	stampClaimed(el);
+	return el;
+}
+
+// Like adoptElement but preserves direct text children. Used by static-component
+// stubs whose SSR content is kept as-is (no client-side re-rendering).
+function adoptElementRaw(marker: Comment, tag?: string): Element | null {
+	const el = marker.nextElementSibling;
+	if (!el) {
+		marker.remove();
+		return null;
+	}
+	if (tag && el.tagName.toLowerCase() !== tag) return null;
+	marker.remove();
+	captureSsrElementChildren(el);
 	stampClaimed(el);
 	return el;
 }
@@ -218,6 +259,13 @@ class WalkerEngine implements HydrateWalker {
 	root: HTMLElement | null;
 	private markers: TrackedMarker[];
 	private idx = 0;
+	// Elements already adopted by an earlier claim in this walk. Marker-only SSR
+	// can leave TWO `<!--vsk-->` marks on the same element (the call site and
+	// the callee's own root marker — e.g. Link self-prefixes `<!--vsk-->` and
+	// the shared walker claims its call-site marker), and a claim must never
+	// adopt the same node twice: double-adoption strips its SSR text a second
+	// time and shells the cursor so every later claim misses its element.
+	private adopted = new WeakSet<Element>();
 
 	constructor(root: HTMLElement | null, markers: Comment[]) {
 		this.root = root;
@@ -228,6 +276,48 @@ class WalkerEngine implements HydrateWalker {
 		return this.idx >= this.markers.length;
 	}
 
+	// A marker whose `nextElementSibling` was already adopted is a dead alias of
+	// a live claim point (double-marker collision). Retire it and move on so the
+	// cursor never claims a node twice.
+	private isAlreadyAdopted(tm: TrackedMarker, el: Element | null): boolean {
+		if (el !== null && this.adopted.has(el)) {
+			tm.state = 'claimed';
+			this.idx++;
+			// Physically retire the alias too: like `adoptElement`, a spent
+			// marker never stays in the live DOM.
+			tm.comment.remove();
+			return true;
+		}
+		return false;
+	}
+
+	private recordAdopted(el: Element): void {
+		this.adopted.add(el);
+	}
+
+	// Marker-only SSR can stack several `<!--vsk-->` marks before ONE element
+	// (call-site marker + the callee's own root marker). The FIRST claim adopts
+	// the element; the alias markers that immediately follow it are dead — they
+	// point at an already-claimed node and must be physically retired so the
+	// canary never counts them and a trailing alias never lingers in the DOM.
+	private retireAliases(el: Element): void {
+		let i = this.idx;
+		while (i < this.markers.length) {
+			const tm = this.markers[i];
+			if (tm.state === 'claimed') {
+				i++;
+				continue;
+			}
+			if (tm.comment.nextElementSibling === el) {
+				tm.state = 'claimed';
+				tm.comment.remove();
+				i++;
+				continue;
+			}
+			break;
+		}
+	}
+
 	nextElement(tag?: string): Element {
 		while (this.idx < this.markers.length) {
 			const tm = this.markers[this.idx];
@@ -236,6 +326,7 @@ class WalkerEngine implements HydrateWalker {
 				continue;
 			}
 			const el = tm.comment.nextElementSibling as Element | null;
+			if (this.isAlreadyAdopted(tm, el)) continue;
 			if (tag && el && el.tagName.toLowerCase() !== tag) {
 				// SSR rendered a different tag than this claim wants. Leave the
 				// marker AND the element untouched and back off without moving
@@ -257,6 +348,8 @@ class WalkerEngine implements HydrateWalker {
 				tm.state = 'claimed';
 				break;
 			}
+			this.recordAdopted(adopted);
+			this.retireAliases(adopted);
 			tm.state = 'claimed';
 			return adopted;
 		}
@@ -284,6 +377,51 @@ class WalkerEngine implements HydrateWalker {
 		return document.createElement(tag || 'div');
 	}
 
+	claimOnly(tag?: string): Element {
+		while (this.idx < this.markers.length) {
+			const tm = this.markers[this.idx];
+			if (tm.state === 'claimed') {
+				this.idx++;
+				continue;
+			}
+			const el = tm.comment.nextElementSibling as Element | null;
+			if (this.isAlreadyAdopted(tm, el)) continue;
+			if (tag && el && el.tagName.toLowerCase() !== tag) break;
+			this.idx++;
+			const adopted = adoptElementRaw(tm.comment, tag);
+			if (adopted === null) {
+				tm.state = 'claimed';
+				break;
+			}
+			this.recordAdopted(adopted);
+			this.retireAliases(adopted);
+			tm.state = 'claimed';
+			return adopted;
+		}
+		return document.createElement(tag || 'div');
+	}
+
+	retireDetached(): void {
+		while (this.idx < this.markers.length) {
+			const tm = this.markers[this.idx];
+			if (tm.state === 'claimed') {
+				this.idx++;
+				continue;
+			}
+			const c = tm.comment;
+			// A marker whose comment is no longer attached cannot belong to any
+			// element this walker can claim, so its SSR content was removed by
+			// the render (e.g. Link's replaceChildren). Skip it and keep the
+			// cursor document-ordered for the next live marker.
+			if (!c || !c.parentNode) {
+				tm.state = 'claimed';
+				this.idx++;
+				continue;
+			}
+			break;
+		}
+	}
+
 	subWalker(rootEl: HTMLElement): HydrateWalker {
 			const subMarkers = this.markers.slice(this.idx).filter((m) => {
 				if (m.state === 'claimed') return false;
@@ -294,18 +432,6 @@ class WalkerEngine implements HydrateWalker {
 			});
 			this.idx += subMarkers.length;
 		for (const m of subMarkers) m.state = 'claimed';
-		// A component's SSR content always carries interior `<!--vsk-->` markers
-		// that the child's own hydrator claims. Exception: plain JS components
-		// (lucide icons etc.) render inside the compiler's boundary wrapper
-		// (`<!--vsk--><span style="display:contents">`) with NO interior markers.
-		// An empty marker list would send the child to `nextElement`'s fresh-node
-		// fallback, orphaning the SSR root inside the claimed wrapper (duplicate
-		// icons, non-reactive if/else blocks after hydration). Fall back to
-		// positional claiming of the wrapper's element children so those
-		// components adopt their SSR root in place, exactly like `.vsk` roots do.
-		if (subMarkers.length === 0 && rootEl && rootEl.tagName === 'SPAN' && rootEl.style && rootEl.style.display === 'contents') {
-			return createHydrateChildWalker(rootEl);
-		}
 		return new WalkerEngine(rootEl, subMarkers.map((m) => m.comment));
 	}
 
@@ -320,10 +446,14 @@ class WalkerEngine implements HydrateWalker {
 			const tm = this.markers[i];
 			if (tm.state === 'claimed') continue;
 			const el = tm.comment.nextElementSibling;
+			if (this.isAlreadyAdopted(tm, el)) continue;
 			if (el && el.getAttribute('data-vsk-key') === strKey) {
 				tm.state = 'claimed';
+				this.recordAdopted(el);
+				this.retireAliases(el);
 				tm.comment.remove();
 				stripDirectTextNodes(el);
+				captureSsrElementChildren(el);
 				stampClaimed(el);
 				return { el };
 			}
@@ -342,6 +472,7 @@ class WalkerEngine implements HydrateWalker {
 			const tm = this.markers[i];
 			if (tm.state === 'claimed') continue;
 			const el = tm.comment.nextElementSibling;
+			if (el && this.adopted.has(el)) continue;
 			if (el && el.getAttribute('data-vsk-key') === strKey) return el;
 		}
 		return null;
@@ -367,6 +498,18 @@ export function createHydrateChildWalker(parentEl: HTMLElement | null): HydrateW
 				const child = children[childIdx++];
 				if (!tag || child.tagName.toLowerCase() === tag) {
 					stripDirectTextNodes(child);
+					captureSsrElementChildren(child);
+					stampClaimed(child);
+					return child;
+				}
+			}
+			return document.createElement(tag || 'div');
+		},
+		claimOnly(tag?: string) {
+			while (childIdx < children.length) {
+				const child = children[childIdx++];
+				if (!tag || child.tagName.toLowerCase() === tag) {
+					captureSsrElementChildren(child);
 					stampClaimed(child);
 					return child;
 				}
@@ -375,6 +518,9 @@ export function createHydrateChildWalker(parentEl: HTMLElement | null): HydrateW
 		},
 		subWalker(rootEl: HTMLElement) {
 			return createHydrateChildWalker(rootEl);
+		},
+		retireDetached() {
+			// Child-walkers hold no marker list; nothing to sweep.
 		},
 	};
 }

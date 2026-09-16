@@ -211,33 +211,11 @@ export function Icon(
   let walkerClaimed = false;
 
   if (anyWalker) {
-    // Case A: walker.root is already the wrapper div or the svg itself.
-    // The server wrapper (when hydrate) is <!--vsk--><div><svg>...</svg></div>
-    // In that case walker.root should be the div, and we want to reuse its inner svg.
-    // Case B: server without wrapper (<!--vsk--><svg>) — nextElement('svg') returns svg directly.
-    // We try both.
+    // Hydrate path: claim the SVG via the walker stream. Do NOT use walker.root,
+    // as walker.root is the page root in marker-only hydration and would cause
+    // containment bugs (creating/appending into the page root, returning the root).
     try {
-      const root = (anyWalker as { root?: Element | null }).root as Element | null;
-      if (root) {
-        const tag = root.tagName.toLowerCase();
-        if (tag === "svg") {
-          svg = root;
-          walkerClaimed = true;
-        } else if (tag === "div") {
-          // wrapper div case — find inner svg
-          const inner = root.querySelector(":scope > svg") || root.querySelector("svg");
-          if (inner && inner.tagName.toLowerCase() === "svg") {
-            svg = inner;
-            walkerClaimed = true;
-          } else {
-            // create svg inside wrapper
-            svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-            root.appendChild(svg);
-            walkerClaimed = true;
-          }
-        }
-      }
-      if (!walkerClaimed && typeof (anyWalker as { nextElement?: (tag?: string) => Element }).nextElement === "function") {
+      if (typeof (anyWalker as { nextElement?: (tag?: string) => Element }).nextElement === "function") {
         const maybe = (anyWalker as { nextElement: (tag?: string) => Element }).nextElement("svg");
         if (maybe && maybe.tagName.toLowerCase() === "svg") {
           svg = maybe;
@@ -291,11 +269,7 @@ export function Icon(
       (ref as { current: unknown }).current = svg;
     }
 
-    // If walkerClaimed via wrapper div, return the wrapper div so parent doesn't duplicate
-    const root = (anyWalker as { root?: Element | null })?.root as Element | null;
-    if (root && root.tagName.toLowerCase() === "div" && svg.parentElement === root) {
-      return root;
-    }
+    // Return the claimed SVG directly. Do not return a wrapper root.
     return svg;
   }
 

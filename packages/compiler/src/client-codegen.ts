@@ -29,6 +29,7 @@ import { transformTopLevelForActions } from '@vesk/compiler/src/actions';
 import { extractRuntimeNames, extractTopLevelNames } from '@vesk/compiler/src/server-utils';
 import { importBindingPairs, localValueImportNames } from '@vesk/compiler/src/module-imports';
 import { stripTrackGeneric } from '@vesk/compiler/src/scan';
+import { importModuleTarget } from '@vesk/compiler/src/tokens';
 import { inlineMdImportsFrom } from '@vesk/compiler/src/md-inline';
 import { stripTsTypes, hasTsSyntax } from '@vesk/compiler/src/strip-ts';
 
@@ -285,6 +286,11 @@ class Ctx {
   c = 0;
   importedNames = new Set<string>();
   linkNames = new Set<string>();
+  // Runtime component imports that claim their own SSR root via `nextElement`
+  // (Link/NavLink/Md/Form/Field/LoadingIndicator) and return a DocumentFragment
+  // when claimed. They need no call-site adoption guard — the guard targets
+  // genuinely-plain components that never touch the walker.
+  selfClaimNames = new Set<string>();
   delegatedEvents = new Set<string>();
   directEvents = new Set<string>();
   hydrate = false;
@@ -428,15 +434,31 @@ function emitStatic(ctx: Ctx, node: StaticNode, tracked: Map<string, TrackedInfo
     }
   }
 
+  let residueBefore = 0;
   for (const child of children) {
     const childVar = emitNode(ctx, child, tracked, effectsVar, el);
     if (childVar) {
       if (ctx.hydrate) {
-        ctx.push(`if (${childVar}.parentNode !== ${el}) { if (!${el} || ${childVar}.parentNode == null || !${el}.contains(${childVar})) ${el}.appendChild(${childVar}); }`);
+        // Fresh text nodes (static or dynamic) cannot be appended at the end of
+        // a claimed element: its SSR element children (component-boundary
+        // wrappers, skipped static markup) are still in the DOM at their SSR
+        // slots, so appending would move the text AFTER them, reordering
+        // mixed text + component children (the hero "compiler-first framework ·
+        // <VersionBadge />" label). Insert the fresh node at the SSR position
+        // of the text instead: the k-th source text child precedes the residue
+        // elements rendered before it, so it slots in before
+        // `el.__vsk_ssrEls[k]` (the residue list captured by the runtime at
+        // claim time).
+        if (child instanceof TextNode || child instanceof DynamicBinding) {
+          ctx.push(`if (${childVar}.parentNode !== ${el}) { const __ssr = ${el}.__vsk_ssrEls || []; if (${residueBefore} < __ssr.length) ${el}.insertBefore(${childVar}, __ssr[${residueBefore}]); else ${el}.appendChild(${childVar}); }`);
+        } else {
+          ctx.push(`if (${childVar}.parentNode !== ${el}) { if (!${el} || ${childVar}.parentNode == null || !${el}.contains(${childVar})) ${el}.appendChild(${childVar}); }`);
+        }
       } else {
         ctx.push(`${el}.appendChild(${childVar});`);
       }
     }
+    residueBefore += ssrResidueEstimate(child);
   }
 
   for (const attr of dynAttrs) {
@@ -644,7 +666,11 @@ function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, T
 
   const propsObj = `{ ${propsEntries.join(', ')} }`;
   const v = ctx.n();
-  const awaitKw = ctx.asyncComps.has(node.componentName) ? 'await ' : '';
+  // Await children whenever the calling scope is async. Async-ness is
+  // parent-driven (mirroring the server side) so that imported async
+  // components from other files — whose names are not in the local
+  // asyncComps set — still resolve to nodes before append/insert.
+  const awaitKw = ctx.isAsyncScope ? 'await ' : '';
   // Member-expression tags (`<it.icon>`) carry the raw component-valued
   // expression — invoke it directly; it is never a registry name.
   const calleeExpr = node.calleeExpr ? `(${node.calleeExpr})` : null;
@@ -653,15 +679,29 @@ function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, T
       ?? (ctx.importedNames.has(node.componentName)
         ? node.componentName
         : `__components[${JSON.stringify(node.componentName)}]`);
-    const subScope = () => ctx.inTryBody
-      ? `${ctx.walker}.subWalker(${parentVar})`
-      : `${ctx.walker}.subWalker(${ctx.walker}.nextElement())`;
+    // SSR for component calls is marker-ONLY (`<!--vsk-->` + the component's
+    // own root; no display:contents wrapper). Compiled `.vsk` components claim
+    // their own root on the SHARED walker. Call targets that are not known
+    // compiled components (imported values, member-expression tags) cannot
+    // claim, so after the call we adopt their SSR root ourselves and replace it
+    // with the fresh node they returned — never a duplicate, never a box.
+    const plainTarget = !!(calleeExpr || ctx.importedNames.has(node.componentName)) && !ctx.selfClaimNames.has(node.componentName);
+    const walkerArg = ctx.walker;
+    const maybeReplace = (v: string) => {
+      if (!plainTarget) return;
+      // nodeType 11 = DocumentFragment: self-claiming imports (Link/Md/Form)
+      // return a fragment when they adopted their SSR root, so there is nothing
+      // to replace — claiming here would steal the NEXT sibling's root.
+      ctx.push(`if (${v} && ${v}.parentNode == null && ${v}.nodeType !== 11) { const __sr = ${walkerArg}.claimOnly(); if (__sr && __sr.parentNode) __sr.parentNode.replaceChild(${v}, __sr); }`);
+    };
+    const maybeRetire = () => {
+      if (ctx.selfClaimNames.has(node.componentName)) {
+        ctx.push(`${walkerArg}.retireDetached();`);
+      }
+    };
     if (node.children.length > 0) {
-      const walkerVar = ctx.n();
-      ctx.push(`const ${walkerVar} = ${subScope()};`);
       const frag = ctx.n();
       ctx.push(`const ${frag} = (() => { const $f = document.createDocumentFragment();`);
-      const savedWalker = ctx.walker;
       const savedEffects = ctx.effects;
       // Link/NavLink hydrate branches WIPE their SSR anchor (a.replaceChildren())
       // and remount the children fragment. Suppressed fully-static children would
@@ -669,7 +709,6 @@ function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, T
       const wipeMount = ctx.linkNames.has(node.componentName);
       const savedHydrate = ctx.hydrate;
       if (wipeMount) ctx.hydrate = false;
-      ctx.walker = walkerVar;
       ctx.effects = [];
       for (const child of node.children) {
         const childVar = emitNode(ctx, child, tracked, effectsVar, '$f');
@@ -677,14 +716,17 @@ function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, T
       }
       for (const eff of ctx.effects) ctx.push(effectsVar ? `${effectsVar}.push(${effectBlockToHandlerExpr(eff)});` : eff);
       ctx.effects = savedEffects;
-      ctx.walker = savedWalker;
       ctx.hydrate = savedHydrate;
       ctx.push(`return $f; })();`);
       propsEntries.push(`children: ${frag}`);
-      ctx.push(`const ${v} = ${awaitKw}${access}({ ${propsEntries.join(', ')} }, __registry, ${walkerVar});`);
+      ctx.push(`const ${v} = ${awaitKw}${access}({ ${propsEntries.join(', ')} }, __registry, ${walkerArg});`);
+      maybeReplace(v);
+      maybeRetire();
       return v;
     }
-    ctx.push(`const ${v} = ${awaitKw}${access}(${propsObj}, __registry, ${subScope()});`);
+    ctx.push(`const ${v} = ${awaitKw}${access}(${propsObj}, __registry, ${walkerArg});`);
+    maybeReplace(v);
+    maybeRetire();
     return v;
   } else {
     if (node.children.length > 0) {
@@ -1518,11 +1560,12 @@ function computeAsyncComponents(comps: ComponentIR[]): Set<string> {
   return new Set(comps.filter((c) => c.isAsync).map((c) => c.name));
 }
 
-function generateComponent(comp: ComponentIR, importedNames: Set<string> = new Set(), hydrate = false, asyncComps: Set<string> = new Set(), linkNames: Set<string> = new Set()): string {
+function generateComponent(comp: ComponentIR, importedNames: Set<string> = new Set(), hydrate = false, asyncComps: Set<string> = new Set(), linkNames: Set<string> = new Set(), selfClaimNames: Set<string> = new Set()): string {
   const tracked = collectTrackedNames(comp.body);
   const ctx = new Ctx();
   ctx.importedNames = importedNames;
   ctx.linkNames = linkNames;
+  ctx.selfClaimNames = selfClaimNames;
   ctx.hydrate = hydrate;
   ctx.asyncComps = asyncComps;
   ctx.isAsyncScope = comp.isAsync || asyncComps.has(comp.name);
@@ -1541,7 +1584,10 @@ function generateComponent(comp: ComponentIR, importedNames: Set<string> = new S
   }
 
   if (ctx.hydrate) {
-    ctx.push(indent(`const $root = __hydrate.root;`));
+    // Direct claiming: the component claims its own SSR root via the shared
+    // walker. The first element the body emits IS the root; there is no
+    // wrapper element to return.
+    ctx.push(indent(`let $root = null;`));
   } else {
     ctx.push(indent(`const $root = document.createDocumentFragment();`));
   }
@@ -1554,7 +1600,8 @@ function generateComponent(comp: ComponentIR, importedNames: Set<string> = new S
     const v = emitNode(ctx, node, tracked, null);
     if (v) {
       if (ctx.hydrate) {
-        ctx.push(indent(`if (${v}.parentNode !== $root) { if (!$root || ${v}.parentNode == null || !$root.contains(${v})) $root.appendChild(${v}); }`));
+        ctx.push(indent(`if ($root === null) $root = ${v};`));
+        ctx.push(indent(`if (${v} !== $root && ${v}.parentNode == null) $root.appendChild(${v});`));
       } else {
         ctx.push(indent(`$root.appendChild(${v});`));
       }
@@ -1567,6 +1614,9 @@ function generateComponent(comp: ComponentIR, importedNames: Set<string> = new S
   const delCode = ctx.emitDelegates();
   if (delCode) ctx.push(indent(delCode.trim()));
 
+  if (ctx.hydrate) {
+    ctx.push(indent(`if ($root === null) $root = document.createDocumentFragment();`));
+  }
   ctx.push(indent(`return __pendingChild || $root;`));
   ctx.push(indent(`} finally {`));
   ctx.push(indent(`\tsetActiveComponent(__prev);`));
@@ -1591,7 +1641,17 @@ function buildComponentMap(irRoot: IRRoot, hydrate = false): string {
   // hydration, so their children fragments must be rebuilt in full. Track the
   // file-local binding names regardless of aliasing (`const Nav = NavLink`).
   const linkNames = new Set<string>();
+  // Runtime components that self-claim during hydration (adopt their own SSR
+  // root via nextElement and return a fragment when claimed). Excluded from the
+  // call-site adoption guard; the walker cursor passes them but never a
+  // claimOnly() on their behalf.
+  const selfClaimNames = new Set<string>();
+  const SELF_CLAIM_RUNTIME = new Set(['Link', 'NavLink', 'Md', 'Form', 'Field', 'LoadingIndicator']);
   for (const imp of irRoot.imports) {
+    if (importModuleTarget(imp) !== '@vesk/runtime') continue;
+    for (const pair of importBindingPairs(imp)) {
+      if (SELF_CLAIM_RUNTIME.has(pair.imported)) selfClaimNames.add(pair.local);
+    }
     for (const pair of importBindingPairs(imp)) {
       if (pair.imported === 'Link' || pair.imported === 'NavLink') linkNames.add(pair.local);
     }
@@ -1607,11 +1667,13 @@ function buildComponentMap(irRoot: IRRoot, hydrate = false): string {
 
   for (const comp of irRoot.components) {
     if (hydrate && isStaticComponent(comp)) {
-      const stub = `(props, __registry, __hydrate) => { return __hydrate.root; }`;
+      // Static components keep their SSR content untouched: claim the root
+      // WITHOUT stripping its direct text (nothing will re-create it).
+      const stub = `(props, __registry, __hydrate) => { return __hydrate.claimOnly(); }`;
       mapLines.push(`__components[${JSON.stringify(comp.name)}] = ${stub};`);
       continue;
     }
-    const code = generateComponent(comp, directNames, hydrate, asyncComps, linkNames);
+    const code = generateComponent(comp, directNames, hydrate, asyncComps, linkNames, selfClaimNames);
     mapLines.push(`__components[${JSON.stringify(comp.name)}] = ${code};`);
   }
 
@@ -1641,6 +1703,35 @@ function buildComponentMap(irRoot: IRRoot, hydrate = false): string {
   mapLines.push(`}`);
 
   return mapLines.join('\n\n');
+}
+
+function ssrResidueEstimate(node: IRNode | IRNode[]): number {
+  if (Array.isArray(node)) {
+    let total = 0;
+    for (const n of node) total += ssrResidueEstimate(n);
+    return total;
+  }
+  if (node instanceof StaticNode) return 1;
+  if (node instanceof ComponentCall) return 1;
+  if (node instanceof OpaqueDynamicRegion) {
+    return Math.max(ssrResidueEstimate(node.consequentNodes), ssrResidueEstimate(node.alternateNodes));
+  }
+  if (node instanceof MapRegion) {
+    return Math.max(ssrResidueEstimate(node.bodyTemplate), ssrResidueEstimate(node.alternateNodes));
+  }
+  if (node instanceof ForLoop) return ssrResidueEstimate(node.bodyTemplate);
+  if (node instanceof WhileLoop) return ssrResidueEstimate(node.bodyTemplate);
+  if (node instanceof SwitchBlock) {
+    let max = 0;
+    for (const c of node.cases) max = Math.max(max, ssrResidueEstimate(c.body));
+    return max;
+  }
+  if (node instanceof TryCatch) {
+    return Math.max(ssrResidueEstimate(node.bodyTemplate), ssrResidueEstimate(node.catchBody));
+  }
+  // TextNode, DynamicBinding, TrackDecl, RuntimeStatement, SlotNode,
+  // ServerBlock, ClientBlock, HeadBlock emit no SSR element residue.
+  return 0;
 }
 
 function isStaticIR(body: IRNode[]): boolean {
