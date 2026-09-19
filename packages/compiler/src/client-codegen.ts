@@ -512,7 +512,79 @@ function emitStatic(ctx: Ctx, node: StaticNode, tracked: Map<string, TrackedInfo
   let residueBefore = 0;
   for (const child of children) {
     let childVar: string | null;
-    if (singleReactiveText && child instanceof DynamicBinding && child.kind === 'text') {
+    // Hydrate mode: pure static subtree children of a claimed element are already
+    // captured in __vsk_ssrEls. Retrieve them instead of claiming via nextElement
+    // (which would miss because SSR emits no marker for static children of dynamic parents).
+    const isPureStaticChild = ctx.hydrate && child instanceof StaticNode && isStaticIR(child.children);
+    if (isPureStaticChild) {
+      const ssrEl = `${el}.__vsk_ssrEls[${residueBefore}]`;
+      childVar = ssrEl;
+      // Process dynamic attributes on the retrieved SSR element
+      const dynAttrs: DynamicBinding[] = [];
+      const staticChildren: IRNode[] = [];
+      for (const c of child.children) {
+        if (c instanceof DynamicBinding && c.kind === 'attribute') {
+          dynAttrs.push(c);
+        } else {
+          staticChildren.push(c);
+        }
+      }
+      for (const attr of dynAttrs) {
+        const target = attr.target || '';
+        const isEvent = target.startsWith('on') && target.length > 2;
+        if (target === 'ref') {
+          const expr = transformTracked(attr.expression as any, tracked);
+          ctx.push(`(${expr})(${ssrEl});`);
+        } else if (isEvent) {
+          const eventName = target.slice(2).toLowerCase();
+          const handler = transformTracked(attr.expression as any, tracked);
+          if (NON_BUBBLING_EVENTS.has(eventName)) {
+            ctx.directEvents.add(eventName);
+            ctx.push(`${ssrEl}.addEventListener(${JSON.stringify(eventName)}, ${handler});`);
+          } else {
+            const prop = `__evh_${eventName}`;
+            ctx.delegatedEvents.add(eventName);
+            ctx.push(`${ssrEl}.${prop} = ${handler};`);
+          }
+          ctx.push(`${ssrEl}.setAttribute('data-vsk-ev', '');`);
+        } else if (target === 'style') {
+          const expr = transformTracked(attr.expression as any, tracked);
+          const eff = `effect(() => { applyStyle(${ssrEl}, ${expr}); })`;
+          if (effectsVar) {
+            ctx.push(`${effectsVar}.push(${eff});`);
+          } else {
+            ctx.effects.push(`${eff};`);
+          }
+        } else {
+          const expr = transformTracked(attr.expression as any, tracked);
+          const useProp = PROPERTY_ATTRS[node.tag]?.has(target);
+          const eff = useProp
+            ? `effect(() => { ${ssrEl}.${target} = ${expr}; })`
+            : `effect(() => { const __v = ${expr}; if (__v != null && __v !== false) ${ssrEl}.setAttribute(${JSON.stringify(target)}, __v === true ? 'true' : String(__v)); })`;
+          if (effectsVar) {
+            ctx.push(`${effectsVar}.push(${eff});`);
+          } else {
+            ctx.effects.push(`${eff};`);
+          }
+        }
+      }
+      // Recursively process static children of this static child (they're also in __vsk_ssrEls)
+      let childResidueBefore = 0;
+      for (const gc of child.children) {
+        if (!(gc instanceof DynamicBinding && gc.kind === 'attribute')) {
+          const gcVar = emitNode(ctx, gc, tracked, effectsVar, ssrEl);
+          if (gcVar && ctx.hydrate) {
+            if (gc instanceof TextNode || gc instanceof DynamicBinding) {
+              ctx.push(`if (${gcVar}.parentNode !== ${ssrEl}) { const __ssr = ${ssrEl}.__vsk_ssrEls || []; if (${childResidueBefore} < __ssr.length) ${ssrEl}.insertBefore(${gcVar}, __ssr[${childResidueBefore}]); else ${ssrEl}.appendChild(${gcVar}); }`);
+            } else {
+              ctx.push(`if (${gcVar}.parentNode !== ${ssrEl}) { if (!${ssrEl} || ${gcVar}.parentNode == null || !${ssrEl}.contains(${gcVar})) ${ssrEl}.appendChild(${gcVar}); }`);
+            }
+          }
+          childResidueBefore += ssrResidueEstimate(gc);
+        }
+      }
+      childVar = null; // Already handled inline, don't append again below
+    } else if (singleReactiveText && child instanceof DynamicBinding && child.kind === 'text') {
       childVar = emitDynamicBinding(ctx, child, tracked, effectsVar, `${el}.__vsk_ssrText`);
     } else {
       childVar = emitNode(ctx, child, tracked, effectsVar, el);

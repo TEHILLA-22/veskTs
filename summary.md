@@ -31,6 +31,8 @@ Sweep of all vesk-doc routes (full reload + 3.5s settle) on `:4000`:
 | `/showcase` | 1 | 44 | **21 mismatch** | ✗ |
 | `/docs` (index) | 1 | **255** | **63 mismatch** | ✗ |
 
+**Critical finding**: All broken routes work correctly **after any SPA navigation** (e.g., `/` → `/docs` SPA nav → `/docs` is clean). The failures **only occur on full reload (SSR→hydrate)**. The client-side rendering after SPA nav has zero leftover markers and zero warns.
+
 Confirmed on test-app for contrast: dev `:3000` **and** prod `:3100` portal routes are both clean (0 warns, 0 leftover, toggle works). Persistent `if`/`map` comments and `vsk-slot:sN` pairs appear identically on clean test-app too — those are by-design residue, not defects.
 
 ### Symptoms match user report
@@ -43,7 +45,9 @@ Confirmed on test-app for contrast: dev `:3000` **and** prod `:3100` portal rout
 
 Reading `packages/runtime/src/hydrate.ts` (claim walker, typed markers `vsk:t:`/`vsk:c:`, `takeMarkers`, `reportMiss`) and `packages/compiler/src/server-jsgen.ts` (SSR marker emission, SlotNode, mapRegion keyed markers). Broken pages share repeated map-generated `<Link>` cards (`vsk:c:Link` typed markers) — claim appears to exhaust markers early, leaving tail unconsumed. `/compiler` also loses `slot-end` marker silently.
 
-Next: build minimal Node/jsdom repro from `/compiler` SSR HTML to iterate fixes fast, then implement fix in `hydrate.ts` / `layout.ts` / `server-jsgen.ts`.
+**Attempted fix**: Modified `packages/compiler/src/client-codegen.ts` `emitStatic` to retrieve pure static children from `__vsk_ssrEls` instead of calling `nextElement` (since SSR emits no marker for static children of dynamic parents). Client-codegen tests pass (281/281). However, dev server cache not fully cleared — fix not yet live on `:4001`.
+
+Next: fully clear vesk-doc cache (`.vesk`, `node_modules/.cache`, browser), rebuild, restart, verify fix works on full reload.
 
 ## Next Move (this session continues)
 
