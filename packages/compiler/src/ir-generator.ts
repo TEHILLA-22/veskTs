@@ -20,6 +20,8 @@ import {
   HeadBlock,
   Expression,
   SlotNode,
+  PropSlot,
+  PropSlotRender,
 } from '@vesk/compiler/src/ir';
 import type { IRNode } from '@vesk/compiler/src/ir';
 import { VeskError, codeFrame } from '@vesk/compiler/src/errors';
@@ -32,6 +34,15 @@ import { collectCalledIdentifiers, extractImportNames, importModuleTarget } from
 import type { VeskAnnotation } from '@vesk/compiler/src/parser';
 
 let __vskAnnotations: VeskAnnotation[] = [];
+
+/**
+ * Prop names of the component currently being processed that are declared as
+ * renderable content (`*: Component`) and are therefore threaded through the
+ * slot channel. A content read `{props.<name>}` of such a prop compiles to
+ * {@link PropSlotRender} instead of a value binding, so the child can render a
+ * slot handed to it by a caller that wrote `name={<div/>}`.
+ */
+let __slotProps: Set<string> | null = null;
 
 function parseExprNode(text: string): ESTreeNode | null {
   try {
@@ -66,6 +77,31 @@ function getSource(source: string, node: { start: number; end: number }): string
   return source.slice(node.start, node.end);
 }
 
+/**
+ * Returns the source text for a loop/map binding pattern, preserving
+ * destructuring (`[a, b]`, `{x, y}`, defaults, rest) while stripping a
+ * top-level TS type annotation (`[a, b]: T` → `[a, b]`). Plain identifiers
+ * return their name directly so `const x: T` still yields `x`.
+ */
+function patternSource(source: string, node: any): string {
+  if (!node) return 'item';
+  if (node.type === 'Identifier') return node.name ?? 'item';
+  const end = node.typeAnnotation ? node.typeAnnotation.start : node.end;
+  const text = source.slice(node.start, end).trim();
+  return text || 'item';
+}
+
+function mapParamSource(source: string, param: any): string {
+  if (!param) return 'item';
+  if (param.type === 'Identifier') return param.name ?? 'item';
+  const end = param.typeAnnotation ? param.typeAnnotation.start : param.end;
+  if (typeof param.start === 'number' && typeof end === 'number') {
+    const text = source.slice(param.start, end).trim();
+    if (text) return text;
+  }
+  return 'item';
+}
+
 function collectComponentCalls(nodes: IRNode[], out: Map<string, number>): void {
   for (const n of nodes) {
     if (n instanceof ComponentCall) {
@@ -73,6 +109,8 @@ function collectComponentCalls(nodes: IRNode[], out: Map<string, number>): void 
       collectComponentCalls(n.children, out);
     } else if (n instanceof StaticNode || n instanceof ServerBlock || n instanceof ClientBlock || n instanceof HeadBlock) {
       collectComponentCalls(n.children, out);
+    } else if (n instanceof PropSlot) {
+      collectComponentCalls(n.body, out);
     } else if (n instanceof MapRegion) {
       collectComponentCalls(n.bodyTemplate, out);
       collectComponentCalls(n.alternateNodes, out);
@@ -275,9 +313,92 @@ function processAttribute(source: string, attr: any): { name: string; value: str
   if (attr.value.type === 'JSXExpressionContainer') {
     const expr = attr.value.expression;
     if (expr.type === 'Literal') return { name, value: String(expr.value) };
+    // A JSX element can never be a DOM attribute value — elements belong to
+    // content/slots, not to an attribute slot on an HTML tag. Surfacing a real
+    // error here beats a raw `(<div/>)` leaking into compiled JS (the previous
+    // behavior crashed with a runtime SyntaxError deep inside codegen).
+    if (containsJSX(expr)) {
+      throw VeskError.attrJsxElement({ attr: name });
+    }
     return { name, value: toExpression(source, expr) };
   }
   return { name, value: '' };
+}
+
+/**
+ * True when `node` (an expression AST) contains a JSX element or fragment
+ * anywhere in its subtree — used to distinguish slot-bearing prop values
+ * (`trigger={<Button/>}`, `trigger={open ? <A/> : <B/>}`) from plain ones
+ * (`align={'end'}`, `count={n + 1}`).
+ */
+function containsJSX(node: any): boolean {
+  if (!node || typeof node !== 'object') return false;
+  if (node.type === 'JSXElement' || node.type === 'JSXFragment') return true;
+  if (node.type === 'JSXExpressionContainer') return containsJSX(node.expression);
+  // TS-only position holders (type annotations, parameter names) never contain
+  // JSX — skipping them avoids walking TS structure.
+  for (const key of [
+    'expression', 'object', 'property', 'callee', 'arguments', 'test',
+    'consequent', 'alternate', 'left', 'right', 'init', 'elements', 'params', 'body',
+  ]) {
+    const child = node[key];
+    if (Array.isArray(child)) {
+      for (const c of child) if (containsJSX(c)) return true;
+    } else if (child && containsJSX(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Returns the prop name when `expr` is a bare `props.<name>` read, else null.
+ */
+function slotReadPropName(expr: any): string | null {
+  if (
+    expr.type === 'MemberExpression' && !expr.computed &&
+    expr.object.type === 'Identifier' && expr.object.name === 'props' &&
+    expr.property.type === 'Identifier'
+  ) {
+    return expr.property.name;
+  }
+  return null;
+}
+
+/**
+ * Parses an inline component props type (`{ trigger: Component; ... }`) and
+ * returns the set of prop names declared as renderable content — any member
+ * whose type text mentions `Component`. Those props may be handed a JSX
+ * element at the call site and are read back with `{props.<name>}` as slots.
+ */
+function slotPropNamesFromType(propsType: string | null): Set<string> {
+  const out = new Set<string>();
+  if (!propsType) return out;
+  const trimmed = propsType.trim();
+  if (trimmed.startsWith('{')) {
+    const inner = findBalancedEnd(trimmed, 0) === trimmed.length - 1
+      ? trimmed.slice(1, -1)
+      : trimmed;
+    for (const part of splitTopLevel(inner, ';')) {
+      const colon = findTopLevelColon(part);
+      if (colon === -1) continue;
+      const namePart = part.slice(0, colon).trim().replace(/^\$/, '').replace(/\?$/, '').trim();
+      const typePart = part.slice(colon + 1).trim();
+      if (namePart && typePart.includes('Component')) out.add(namePart);
+    }
+  }
+  return out;
+}
+
+function findTopLevelColon(text: string): number {
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '(' || ch === '[' || ch === '{' || ch === '<') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
+    else if (ch === ':' && depth === 0) return i;
+  }
+  return -1;
 }
 
 /**
@@ -425,7 +546,7 @@ function processJSXChildren(source: string, children: any[]): IRNode[] {
           const exprText = ofParts[1].trim();
           const arrExpr = new Expression(exprText, [], parseExprNode(exprText), null);
           const rawFor = hasForPrefix(child.value);
-          const ann = rawFor ? getForClauseAnnotation(child.start + rawFor) : null;
+          const ann = rawFor !== -1 ? getForClauseAnnotation(child.start + rawFor) : null;
           const keyExpr = ann?.keyRange ? new Expression(source.slice(ann.keyRange[0], ann.keyRange[1])) : null;
           const indexVar = ann?.indexName ?? null;
           let alternate: IRNode[] = [];
@@ -463,7 +584,7 @@ function processJSXChildren(source: string, children: any[]): IRNode[] {
 
       if (isMapCall(expr)) {
         const arrowFn = expr.arguments[0];
-        const itemVar = arrowFn.params[0]?.name ?? 'item';
+        const itemVar = mapParamSource(source, arrowFn.params[0]);
         const indexVar = arrowFn.params[1]?.name ?? null;
         const bodyNodes = processJSXCallbackBody(source, arrowFn.body);
         const arrayExpr = toExpression(source, expr.callee.object);
@@ -499,6 +620,17 @@ function processJSXChildren(source: string, children: any[]): IRNode[] {
         result.push(new SlotNode());
         i++;
         continue;
+      }
+
+      // A content read of a component-declared slot prop (`{props.trigger}`)
+      // must render the threaded content — not stringify a fragment.
+      {
+        const slotName = slotReadPropName(expr);
+        if (slotName !== null && __slotProps !== null && __slotProps.has(slotName)) {
+          result.push(new PropSlotRender(slotName));
+          i++;
+          continue;
+        }
       }
 
       result.push(new DynamicBinding(toExpression(source, expr)));
@@ -553,7 +685,7 @@ function exprToIR(source: string, expr: any): IRNode[] {
   }
   if (isMapCall(expr)) {
     const arrowFn = expr.arguments[0];
-    const itemVar = arrowFn.params[0]?.name ?? 'item';
+    const itemVar = mapParamSource(source, arrowFn.params[0]);
     const indexVar = arrowFn.params[1]?.name ?? null;
     const bodyNodes = processJSXCallbackBody(source, arrowFn.body);
     const arrayExpr = toExpression(source, expr.callee.object);
@@ -574,6 +706,21 @@ function exprToIR(source: string, expr: any): IRNode[] {
     const condExpr = toExpression(source, expr.left);
     const consequent = exprToIR(source, expr.right);
     return [new OpaqueDynamicRegion(condExpr, consequent)];
+  }
+  // `props.children` (or bare `children`) inside an expression branch must
+  // insert the slot nodes — not degrade to a text binding that stringifies
+  // the fragment (`String(props.children)` → "[object DocumentFragment]").
+  if (
+    (expr.type === 'MemberExpression' && !expr.computed &&
+      expr.object.type === 'Identifier' && expr.object.name === 'props' &&
+      expr.property.type === 'Identifier' && expr.property.name === 'children')
+    || (expr.type === 'Identifier' && expr.name === 'children')
+  ) {
+    return [new SlotNode()];
+  }
+  const slotName = slotReadPropName(expr);
+  if (slotName !== null && __slotProps !== null && __slotProps.has(slotName)) {
+    return [new PropSlotRender(slotName)];
   }
   return [new DynamicBinding(toExpression(source, expr))];
 }
@@ -632,20 +779,20 @@ function processJSXElement(source: string, element: any): IRNode[] {
   // actual in-scope value instead of `document.createElement("it.icon")` or a
   // registry lookup by dotted string.
   if (nameNode && nameNode.type === 'JSXMemberExpression') {
-    const { props, spreadProps } = extractProps(source, element);
+    const { props, spreadProps, slots } = extractProps(source, element);
     const children = selfClosing ? [] : processJSXChildren(source, element.children || []);
-    return [new ComponentCall(tagName, props, children, spreadProps, element.start, getSource(source, nameNode))];
+    return [new ComponentCall(tagName, props, [...children, ...slots.map((s) => new PropSlot(s.name, s.nodes))], spreadProps, element.start, getSource(source, nameNode))];
   }
 
   if (!isHTMLTag(tagName) && selfClosing) {
-    const { props, spreadProps } = extractProps(source, element);
-    return [new ComponentCall(tagName, props, [], spreadProps, element.start)];
+    const { props, spreadProps, slots } = extractProps(source, element);
+    return [new ComponentCall(tagName, props, slots.map((s) => new PropSlot(s.name, s.nodes)), spreadProps, element.start)];
   }
 
   if (!isHTMLTag(tagName)) {
-    const { props, spreadProps } = extractProps(source, element);
+    const { props, spreadProps, slots } = extractProps(source, element);
     const children = processJSXChildren(source, element.children || []);
-    return [new ComponentCall(tagName, props, children, spreadProps, element.start)];
+    return [new ComponentCall(tagName, props, [...children, ...slots.map((s) => new PropSlot(s.name, s.nodes))], spreadProps, element.start)];
   }
 
   const attributes = element.openingElement.attributes
@@ -678,25 +825,34 @@ function processJSXElement(source: string, element: any): IRNode[] {
   return [node];
 }
 
-function extractProps(source: string, element: any): { props: { name: string; value: Expression }[]; spreadProps: Expression[] } {
+function extractProps(source: string, element: any): { props: { name: string; value: Expression }[]; spreadProps: Expression[]; slots: { name: string; nodes: IRNode[] }[] } {
   const props: { name: string; value: Expression }[] = [];
   const spreadProps: Expression[] = [];
+  const slots: { name: string; nodes: IRNode[] }[] = [];
   for (const attr of element.openingElement.attributes) {
     if (attr.type === 'JSXSpreadAttribute') {
       spreadProps.push(toExpression(source, attr.argument));
     } else {
-      props.push({
-        name: attr.name.type === 'JSXIdentifier' ? attr.name.name : getSource(source, attr.name),
-        value:
-          attr.value === null
-            ? new Expression('true')
-            : attr.value.type === 'JSXExpressionContainer'
-              ? toExpression(source, attr.value.expression)
-              : new Expression(JSON.stringify(attr.value.value)),
-      });
+      const name = attr.name.type === 'JSXIdentifier' ? attr.name.name : getSource(source, attr.name);
+      let value: Expression;
+      if (attr.value === null) {
+        value = new Expression('true');
+      } else if (attr.value.type === 'JSXExpressionContainer') {
+        const expr = attr.value.expression;
+        // JSX elements as prop values are named content slots (`trigger={<Button/>}`),
+        // not scalar values — the call site hoists them into the slot channel.
+        if (containsJSX(expr)) {
+          slots.push({ name, nodes: exprToIR(source, expr) });
+          continue;
+        }
+        value = toExpression(source, expr);
+      } else {
+        value = new Expression(JSON.stringify(attr.value.value));
+      }
+      props.push({ name, value });
     }
   }
-  return { props, spreadProps };
+  return { props, spreadProps, slots };
 }
 
 function buildGuardChain(source: string, guardClauses: any[], mainReturn: any): IRNode[] {
@@ -825,10 +981,14 @@ function processIfStatement(source: string, stmt: any): IRNode[] {
 function processForStatement(source: string, stmt: any, alternate: IRNode[] = []): IRNode[] {
   if (stmt.type === 'ForOfStatement') {
     const left = stmt.left;
-    const itemVar =
-      left.type === 'VariableDeclaration'
-        ? left.declarations[0]?.id?.name ?? 'item'
-        : left.name ?? 'item';
+    let itemVar = 'item';
+    if (left.type === 'VariableDeclaration') {
+      itemVar = patternSource(source, left.declarations[0]?.id);
+    } else if (left.type === 'Identifier') {
+      itemVar = left.name ?? 'item';
+    } else if (typeof left.start === 'number' && typeof left.end === 'number') {
+      itemVar = source.slice(left.start, left.end).trim() || 'item';
+    }
     const arrayExpr = toExpression(source, stmt.right);
     const bodyTemplate = processBlockBody(source, stmt.body);
     const ann = getForClauseAnnotation(stmt.start);
@@ -1074,6 +1234,7 @@ function idxOfQuote(s: string, from: number): number {
 
 export function generateIR(ast: any, source: string, filename?: string): IRRoot {
   __vskAnnotations = (ast as { __vskAnnotations?: VeskAnnotation[] }).__vskAnnotations ?? [];
+  __slotProps = null;
   const file = filename || '';
   const components: ComponentIR[] = [];
   const imports: string[] = [];
@@ -1170,6 +1331,12 @@ export function generateIR(ast: any, source: string, filename?: string): IRRoot 
     const bodyStmts = inner.body.body;
     const isClientComp = !!inner.client;
 
+    // Slot props are declared at the component boundary (`trigger: Component`),
+    // so content reads of `props.<name>` compile to slot renders instead of
+    // value bindings for THIS component only.
+    const prevSlotProps: Set<string> | null = __slotProps;
+    __slotProps = slotPropNamesFromType(propsType);
+
     if (isStatementMode(bodyStmts)) {
       const raw = processStatementModeBody(source, bodyStmts, file);
       const { body, css } = extractStyle(raw);
@@ -1177,6 +1344,7 @@ export function generateIR(ast: any, source: string, filename?: string): IRRoot 
       const comp = new ComponentIR(name, paramNames, body, { mode: 'statement', exported, defaultExport, isClient: inner.client, isAsync: inner.async, ssrAwait: componentUsesFetch(body), propsType });
       comp.style = css;
       components.push(comp);
+      __slotProps = prevSlotProps;
     } else {
       const guardClauses: any[] = [];
       let mainReturn: any = null;
@@ -1217,6 +1385,7 @@ export function generateIR(ast: any, source: string, filename?: string): IRRoot 
       const comp = new ComponentIR(name, paramNames, body, { exported, defaultExport, isClient: inner.client, isAsync: inner.async, ssrAwait: componentUsesFetch(body), propsType });
       comp.style = css;
       components.push(comp);
+      __slotProps = prevSlotProps;
     }
   }
 

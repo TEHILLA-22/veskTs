@@ -145,6 +145,20 @@ console.log('\n\u2550\u2550\u2550 Vesk HMR client module tests (DOM-free) \u2550
 	assert(nodes.stack === 'at renderPage (app/page.vsk:1000:17)', 'stack text preserved');
 }
 
+// buildErrorNodes renders a VeskError code badge (V0412 style)
+{
+	const nodes = buildErrorNodes({ file: 'app/page.vsk', filePath: '', line: 15, column: 3, message: 'Reactive read outside a tracked scope', code: 'V0412' });
+	assert(nodes.file.includes('[V0412]'), 'file header carries the [V0412] code badge');
+	assert(nodes.file.includes('app/page.vsk:15:3'), 'file header still shows file, line and column');
+	assert(nodes.message.includes('outside a tracked scope'), 'message intact next to the badge');
+}
+
+// buildErrorNodes with a code but no file keeps the badge on the fallback name
+{
+	const nodes = buildErrorNodes({ file: '', filePath: '', line: null, column: null, message: 'x', code: 'V0401' });
+	assert(nodes.file.includes('[V0401]') && nodes.file.includes('unknown file'), 'code badge renders even with no filename');
+}
+
 // buildErrorNodes with non-acorn (actionable) messages keeps them verbatim
 {
 	const nodes = buildErrorNodes({ file: 'app/page.vsk', line: 4, column: 2, message: 'someVar is not defined', codeframe: undefined, stack: undefined });

@@ -9,6 +9,7 @@ import { buildErrorPayload, createHmrServer } from './hmr';
 import * as hmrApi from './hmr';
 import type { HmrErrorPayload } from './hmr';
 import { createDevApiRouter } from './dev-api';
+import { resolveRuntimeErrorPayload, renderDevErrorPage } from './ssr-error';
 import { buildTreeShakenRuntime, runtimeExportNames } from '@vesk/adapter/src/client-bundle';
 import { resolveWithin, installMdReadHook } from '@vesk/adapter/src/paths';
 import type { RouteNode, DevServerOptions, Manifest, VeskPlugin } from '@vesk/adapter/src/types';
@@ -409,6 +410,25 @@ export async function startDevServer(appDir: string, options?: DevServerOptions)
   let runtimeBundle = '';
   let pendingInitialError: HmrErrorPayload | null = null;
 
+  /**
+   * Render an SSR failure as the unified dev error page (same payload shape
+   * the HMR overlay shows): the `.vsk`/`.ts` source site, codeframe, tips,
+   * and the `VeskError` code when present — never a bare `500` page. Best
+   * effort: on any failure falls back to the old generic 500 HTML.
+   */
+  function renderSsrErrorPage(e: unknown, pathname: string): string {
+    try {
+      const payload = resolveRuntimeErrorPayload(e, {
+        appDir,
+        projectDir: resolve(appDir, '..'),
+        componentMap,
+      });
+      return injectDevScripts(renderDevErrorPage(payload, { status: 500, url: pathname }));
+    } catch {
+      return '<!DOCTYPE html><html><body><h1>500</h1><pre>Internal Server Error</pre></body></html>';
+    }
+  }
+
   interface DevEventsModule {
     executeStart?: (base?: Record<string, unknown>) => Promise<void>;
     executeRequest?: (base?: Record<string, unknown>) => Promise<void>;
@@ -720,7 +740,7 @@ let finalBody = body;
             console.error(`[vdtime] ${url.pathname} ssrVersion=${ssrVersion} total=${Number(tHandle1 - t0) / 1e6 | 0}ms import=${Number(tImport1 - tImport0) / 1e6 | 0}ms handle=${Number(tHandle1 - tImport1) / 1e6 | 0}ms text=${Number(tText1 - tHandle1) / 1e6 | 0}ms`);
           } catch (e) {
             res.writeHead(500, { 'Content-Type': 'text/html' });
-            res.end('<!DOCTYPE html><html><body><h1>500</h1><pre>Internal Server Error</pre></body></html>');
+            res.end(renderSsrErrorPage(e, url.pathname));
           }
           return;
         }
@@ -747,7 +767,7 @@ let finalBody = body;
             res.end(finalBody);
           } catch (e) {
             res.writeHead(500, { 'Content-Type': 'text/html' });
-            res.end('<!DOCTYPE html><html><body><h1>500</h1><pre>Internal Server Error</pre></body></html>');
+            res.end(renderSsrErrorPage(e, url.pathname));
           }
           return;
         }

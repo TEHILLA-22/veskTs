@@ -36,6 +36,8 @@ export interface HmrErrorPayload {
 	suggestions?: string[];
 	nextSteps?: string[];
 	stack?: string;
+	/** Optional VeskError-style code (e.g. `V0412`) carried on the thrown error. */
+	code?: string;
 }
 
 export interface DevClientOptions {
@@ -174,6 +176,7 @@ export function buildErrorNodes(payload: HmrErrorPayload): ErrorNodes {
 		file += ':' + payload.line;
 		if (payload.column != null) file += ':' + payload.column;
 	}
+	if (payload.code) file = '[' + escapeHtml(payload.code) + '] ' + file;
 	const rawMessage = payload.message || 'Unknown error';
 	// surface the raw message even for terse acorn errors — the codeframe
 	// + tips add context, but the token itself is still useful
@@ -191,6 +194,30 @@ export function buildErrorNodes(payload: HmrErrorPayload): ErrorNodes {
 		lists,
 		stack: payload.stack || '(no stack trace)',
 	};
+}
+
+/**
+ * Body POSTed to `POST /__vesk/error-resolve` so the dev server can resolve a
+ * client-side runtime failure (compiled-bundle coordinates) to the canonical
+ * HMR payload (`.vsk` file + line/column + codeframe + tips). Pure — the
+ * overlay re-shows whatever payload the server returns. Best-effort: the
+ * endpoint 404s outside `vesk dev` and the caller ignores all failures.
+ */
+export function buildErrorResolveBody(
+	message: string,
+	extra?: Partial<HmrErrorPayload>,
+): { message: string; stack?: string; filename?: string; line?: number | null; column?: number | null; code?: string } {
+	const body: { message: string; stack?: string; filename?: string; line?: number | null; column?: number | null; code?: string } = {
+		message,
+	};
+	if (extra) {
+		if (typeof extra.stack === 'string' && extra.stack) body.stack = extra.stack;
+		if (typeof extra.file === 'string' && extra.file) body.filename = extra.file;
+		if (extra.line != null) body.line = extra.line;
+		if (extra.column != null) body.column = extra.column;
+		if (typeof extra.code === 'string' && extra.code) body.code = extra.code;
+	}
+	return body;
 }
 
 export function renderPluginRow(p: PluginInfo, index: number): string {
@@ -1886,7 +1913,7 @@ export function createDevClient(opts?: DevClientOptions): { dispose(): void } {
 	// (SSR marker / uncaught exception, shown before the socket connects)
 	// must survive the connect-time clearError — the failing DOM is still
 	// what the user sees until new code lands.
-	let lastErrorSource: 'ws' | 'runtime' | null = null;
+	let lastErrorSource: 'ws' | 'runtime' | 'runtime-resolved' | null = null;
 	// True until loadPersistedState() has resolved (success or failure). A
 	// socket connect during that window must not call clearError(), or it would
 	// wipe the error the page just replayed over HTTP on refresh.
@@ -4234,6 +4261,29 @@ export function createDevClient(opts?: DevClientOptions): { dispose(): void } {
 				});
 				lastErrorSource = 'runtime';
 			} catch { /* overlay is best-effort */ }
+			// Unify with HMR reporting: ask the dev server to resolve the
+			// compiled-bundle coordinates (e.g. `page-index.js:833` for
+			// `Menu is not defined` in `__components.SiteHeader`) back to the
+			// `.vsk` file/line + codeframe + tips, then re-show the same
+			// overlay with the resolved payload. The endpoint only exists on
+			// `vesk dev`; every failure path keeps the immediate overlay.
+			try {
+				if (typeof fetch !== 'function') return;
+				fetch('/__vesk/error-resolve', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(buildErrorResolveBody(message, extra)),
+				})
+					.then(function (r: Response) { return r && r.ok ? r.json() : null; })
+					.then(function (p: unknown) {
+						if (disposed || !p || typeof (p as HmrErrorPayload).message !== 'string') return;
+						try {
+							handleError(p as HmrErrorPayload);
+							lastErrorSource = 'runtime-resolved';
+						} catch { /* overlay is best-effort */ }
+					})
+					.catch(function () { /* dev server unreachable — keep the immediate overlay */ });
+			} catch { /* ignore */ }
 		};
 		// SSR failure marker baked into error pages:
 		// <!--vesk-ssr-error:<uri-encoded message>-->.

@@ -13,7 +13,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { routeDevPanel, injectDevScripts, injectSsrErrorMarker, DEV_SCRIPTS, buildDevErrorPayload } from './dev-server.js';
+import { routeDevPanel, injectDevScripts, injectSsrErrorMarker, DEV_SCRIPTS, buildDevErrorPayload, resolveDevErrorReport, devErrorContextForMatch } from './dev-server.js';
 
 let passed = 0;
 let failed = 0;
@@ -307,6 +307,73 @@ async function main() {
     const state = JSON.parse(rec.body) as { error: { message: string; file?: string; codeframe?: unknown; line?: number | null } };
     assert(state.error.message === 'Parse failed at line 6 column 2', 'state passes the raw compile error through');
     assert(state.error.codeframe !== undefined && state.error.line === 6, 'state replays the structured codeframe so a refreshed page restores the red error line');
+  }
+
+  // ---- resolveDevErrorReport: compiled client coords resolve to the .vsk
+  // use site (the `Menu is not defined` unification: same payload as HMR) ----
+  {
+    const proj = mkdtempSync(join(tmpdir(), 'vesk-err-resolve-'));
+    try {
+      const appDir = join(proj, 'app');
+      mkdirSync(appDir, { recursive: true });
+      mkdirSync(join(proj, 'components'), { recursive: true });
+      writeFileSync(
+        join(proj, 'components', 'SiteHeader.vsk'),
+        'component SiteHeader() {\n  <header>\n    <nav><Menu items={items} /></nav>\n  </header>\n}',
+        'utf-8',
+      );
+      writeFileSync(join(appDir, 'page.vsk'), 'component Home() {\n  <main><SiteHeader /></main>\n}', 'utf-8');
+      const stack = [
+        'ReferenceError: Menu is not defined',
+        '    at $n25 (http://localhost:3200/_vesk/static/page-index.js:833:14)',
+        '    at __components.SiteHeader (http://localhost:3200/_vesk/static/page-index.js:854:14)',
+        '    at __components.Home [as page] (http://localhost:3200/_vesk/static/page-index.js:1266:39)',
+      ].join('\n');
+      const p = resolveDevErrorReport(
+        { message: 'Menu is not defined', stack, filename: 'http://localhost:3200/_vesk/static/page-index.js', line: 833, column: 14 },
+        { projectDir: proj, appDir, routeTree: [] },
+      );
+      assert(p.file === 'components/SiteHeader.vsk', `error-resolve names the .vsk file, not the bundle (got ${p.file})`);
+      assert(p.line === 3, `error-resolve names the .vsk line, not bundle line 833 (got ${p.line})`);
+      assert(!!p.codeframe && p.codeframe.code.some((l) => l.isError && l.text.includes('<Menu')), 'error-resolve carries the use-site codeframe');
+      assert((p.tips || []).length >= 1, 'error-resolve carries tips');
+
+      // A report carrying a VeskError-style code surfaces it.
+      const coded = resolveDevErrorReport(
+        { message: 'Reactive read outside a tracked scope', code: 'V0412' },
+        { projectDir: proj, appDir, routeTree: [] },
+      );
+      assert(coded.code === 'V0412', `error-resolve preserves a VeskError code (got ${String(coded.code)})`);
+
+      // Unknown report shapes never throw and keep the message.
+      const q = resolveDevErrorReport({ message: 'weird boom' }, { projectDir: proj, appDir, routeTree: [] });
+      assert(q.message === 'weird boom', 'unknown report keeps its message');
+
+      // Match-scoped context lists the route files deepest-first.
+      mkdirSync(join(appDir, 'store'), { recursive: true });
+      writeFileSync(join(appDir, 'store', 'page.vsk'), 'component Store() {\n  <p>store</p>\n}', 'utf-8');
+      writeFileSync(join(appDir, 'layout.vsk'), 'component Layout() {\n  <html>{props.children}</html>\n}', 'utf-8');
+      const matchCtx = devErrorContextForMatch(
+        { nodes: [{ sourceDir: appDir }, { sourceDir: join(appDir, 'store') }] },
+        appDir,
+        proj,
+        [],
+      );
+      assert(matchCtx.routeFiles?.[0] === join(appDir, 'store', 'page.vsk'), 'match context leads with the deepest page');
+      assert(!!matchCtx.routeFiles && matchCtx.routeFiles.includes(join(appDir, 'layout.vsk')), 'match context includes layouts');
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  }
+
+  // ---- SSR stream path buffers before writeHead (a mid-render throw must
+  // reach the unified 500 page, never a truncated 200 + ERR_HTTP_HEADERS_SENT
+  // crash) + the 500 branch bails when headers are already sent ----
+  {
+    const src = readFileSync(new URL('./dev-server.ts', import.meta.url), 'utf-8');
+    assert(!src.includes("'Transfer-Encoding': 'chunked'"), 'dev SSR no longer chunk-streams a 200 before the render settles');
+    assert(src.includes('chunks.join('), 'dev SSR buffers stream chunks before writeHead');
+    assert(src.includes('res.headersSent || res.writableEnded'), 'SSR 500 branch guards against double-writeHead so a late throw cannot kill the dev server');
   }
 
   rmSync(tmpProject, { recursive: true, force: true });

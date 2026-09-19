@@ -35,6 +35,8 @@ export interface ErroredLocation {
   message: string;
   stack: string | null;
   codeframe: Codeframe | null;
+  /** VeskError-style `.code` (e.g. `V0412`) when the thrown error carries one. */
+  code?: string;
 }
 
 const LOCATION_RE = /\((\d+):(\d+)\)/;
@@ -138,6 +140,9 @@ export function parseCompilerError(err: unknown, file: string, src?: string): Er
     if (codeframe) codeframe.file = fileResolved;
   }
 
+  let code: string | undefined;
+  if (record && typeof record.code === 'string' && record.code) code = record.code;
+
   return {
     file: fileResolved,
     line,
@@ -145,5 +150,6 @@ export function parseCompilerError(err: unknown, file: string, src?: string): Er
     message,
     stack,
     codeframe,
+    code,
   };
 }

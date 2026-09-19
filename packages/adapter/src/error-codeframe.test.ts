@@ -72,6 +72,15 @@ const veskLike = parseCompilerError({ message: 'nope', line: 4, column: 2 }, 'f.
 assert(veskLike !== null && veskLike.line === 4 && veskLike.column === 2, 'VeskError-like .line/.column are taken as-is (1-based)');
 assert(veskLike && veskLike.stack === null, 'stack is null when absent');
 
+// --- parseCompilerError: VeskError-style .code is extracted ---
+const coded = parseCompilerError({ message: 'nope', line: 4, column: 2, code: 'V0412' }, 'f.vsk', src);
+assert(coded !== null && coded.code === 'V0412', 'VeskError code V0412 surfaces on the parsed location');
+assert(coded && coded.line === 4 && coded.column === 2, 'coded error keeps its location fields');
+const noCode = parseCompilerError({ message: 'nope', line: 4, column: 2 }, 'f.vsk', src);
+assert(noCode !== null && noCode.code === undefined, 'error without .code yields no code field');
+const emptyCode = parseCompilerError({ message: 'x', code: '' }, 'f.vsk', src);
+assert(emptyCode !== null && emptyCode.code === undefined, 'empty-string code is dropped');
+
 // --- parseCompilerError: embedded "(line:column)" in message text (0-based column) ---
 const embedded = parseCompilerError({ message: 'Unexpected token (12:5)' }, 'f.vsk', src);
 assert(embedded !== null && embedded.line === 12 && embedded.column === 6, 'plain message embedding (12:5) yields line 12, column 6');

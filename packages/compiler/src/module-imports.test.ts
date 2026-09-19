@@ -17,6 +17,9 @@ import {
   resolveSsrModule,
   loadSsrModule,
   applyLocalModuleImports,
+  resolveImportPath,
+  resolveAliasModule,
+  findTsconfigPath,
 } from '@vesk/compiler/src/module-imports';
 
 let passed = 0;
@@ -712,6 +715,121 @@ test('SSR: side-effect import + value import both present during render', () => 
     ].join('\n');
     const html = render(src, 'Page', {}, new Map(), { sourcePath: fx.file('page.vsk') }) as string;
     expect(html).toContain('ran:1');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// ============================================================
+// resolveImportPath: bundler-facing relative rewrite
+// ============================================================
+test('resolveImportPath: explicit .ts is preserved (never becomes .ts.ts)', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(fx.file('app/_lib'), { recursive: true });
+    writeFileSync(fx.file('app/_lib/emerald-data.ts'), `export const PROGRAMS: string[] = [];`);
+    const fromDir = fx.file('app/pages');
+    const resolved = resolveImportPath('../_lib/emerald-data.ts', fromDir);
+    expect(resolved).toEqual(fx.file('app/_lib/emerald-data.ts'));
+    if (resolved.endsWith('.ts.ts')) throw new Error(`regression: appended .ts to an explicit extension → ${resolved}`);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('resolveImportPath: extensionless probes .ts and component targets probe .vsk', () => {
+  const fx = makeFixture();
+  try {
+    writeFileSync(fx.file('data.ts'), `export const A = 1;`);
+    writeFileSync(fx.file('Widget.vsk'), `component Widget { <p>w</p> }`);
+    expect(resolveImportPath('./data', fx.dir)).toEqual(fx.file('data.ts'));
+    expect(resolveImportPath('./Widget', fx.dir)).toEqual(fx.file('Widget.vsk'));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('resolveImportPath: bare/npm specifiers are returned unchanged without aliases', () => {
+  const fx = makeFixture();
+  try {
+    expect(resolveImportPath('lucide-vesk', fx.dir)).toEqual('lucide-vesk');
+    expect(resolveImportPath('node:fs', fx.dir)).toEqual('node:fs');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// ============================================================
+// tsconfig `paths` aliases
+// ============================================================
+function writeTsconfig(fx: Fixture, text: string): void {
+  writeFileSync(fx.file('tsconfig.json'), text);
+}
+
+test('findTsconfigPath: walks up to the nearest tsconfig.json', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(fx.file('app/pages'), { recursive: true });
+    writeTsconfig(fx, `{ "compilerOptions": {} }`);
+    expect(findTsconfigPath(fx.file('app/pages'))).toEqual(fx.file('tsconfig.json'));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('resolveAliasModule/resolveSsrModule: @/ and @app/ paths resolve from baseUrl', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(fx.file('app/lib'), { recursive: true });
+    mkdirSync(fx.file('src'), { recursive: true });
+    writeFileSync(fx.file('app/lib/data.ts'), `export const D = 1;`);
+    writeFileSync(fx.file('src/util.ts'), `export const U = 2;`);
+    // JSONC: comments + trailing commas must parse.
+    writeTsconfig(fx, [
+      `{`,
+      `  // path aliases`,
+      `  "compilerOptions": {`,
+      `    "baseUrl": ".",`,
+      `    "paths": {`,
+      `      "@/*": ["src/*"],`,
+      `      "@app/*": ["app/*"],`,
+      `    },`,
+      `  },`,
+      `}`,
+    ].join('\n'));
+
+    expect(resolveAliasModule('@/util', fx.dir)).toEqual(fx.file('src/util.ts'));
+    expect(resolveAliasModule('@app/lib/data', fx.dir)).toEqual(fx.file('app/lib/data.ts'));
+    expect(resolveSsrModule('@/util', fx.dir)).toEqual(fx.file('src/util.ts'));
+    expect(resolveSsrModule('@app/lib/data', fx.dir)).toEqual(fx.file('app/lib/data.ts'));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('resolveImportPath: alias resolves to an absolute path; missing alias falls through', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(fx.file('app/lib'), { recursive: true });
+    writeFileSync(fx.file('app/lib/data.ts'), `export const D = 1;`);
+    writeTsconfig(fx, `{ "compilerOptions": { "baseUrl": ".", "paths": { "@app/*": ["app/*"] } } }`);
+    expect(resolveImportPath('@app/lib/data', fx.dir)).toEqual(fx.file('app/lib/data.ts'));
+    // No alias target → returned unchanged so the bundler reports it by name.
+    expect(resolveImportPath('@app/lib/missing', fx.dir)).toEqual('@app/lib/missing');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('resolveSsrModule: unaliased bare specifier still uses node_modules when tsconfig has paths', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(fx.file('node_modules/fixpkg/dist'), { recursive: true });
+    writeFileSync(fx.file('node_modules/fixpkg/package.json'), JSON.stringify({ name: 'fixpkg', version: '1.0.0', exports: { '.': './dist/lib.js' } }));
+    writeFileSync(fx.file('node_modules/fixpkg/dist/lib.js'), `export const VALUE = 'from-map';`);
+    writeTsconfig(fx, `{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }`);
+    const resolved = resolveSsrModule('fixpkg', fx.dir);
+    expect(resolved).toEqual(fx.file('node_modules/fixpkg/dist/lib.js'));
   } finally {
     fx.cleanup();
   }

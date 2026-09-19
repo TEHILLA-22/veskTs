@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, realpathSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { print } from 'esrap';
@@ -645,10 +645,180 @@ function createModuleRequire(fromDir: string): (specifier: string) => unknown {
   };
 }
 
+// ---------------------------------------------------------------------------
+// tsconfig `paths` aliases.
+//
+// App code may import through tsconfig aliases (`@/lib/guide`, `@app/x`). The
+// framework resolves them against the nearest `tsconfig.json` (walking up from
+// the importing file) using `compilerOptions.baseUrl` + `compilerOptions.paths`
+// with a single trailing `*` wildcard. Parsed configs are cached by tsconfig
+// path and invalidated on mtime.
+// ---------------------------------------------------------------------------
+
+interface TsconfigAliases {
+  exact: Map<string, string[]>;
+  wildcard: Array<{ prefix: string; suffix: string; targets: string[] }>;
+}
+
+const EMPTY_ALIASES: TsconfigAliases = { exact: new Map(), wildcard: [] };
+const ALIAS_CACHE = new Map<string, { mtimeMs: number; aliases: TsconfigAliases }>();
+
+/** Strips `//` + block comments and trailing commas so a tsconfig.json parses. */
+function parseJsonc(raw: string): unknown {
+  let out = '';
+  let inString = false;
+  let quote = '';
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i] as string;
+    const next = raw[i + 1];
+    if (inString) {
+      out += ch;
+      if (ch === '\\') {
+        out += next ?? '';
+        i++;
+      } else if (ch === quote) {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      while (i < raw.length && raw[i] !== '\n') i++;
+      out += '\n';
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < raw.length && !(raw[i] === '*' && raw[i + 1] === '/')) i++;
+      i++;
+      continue;
+    }
+    out += ch;
+  }
+  return JSON.parse(out.replace(/,\s*([}\]])/g, '$1'));
+}
+
+/** Nearest `tsconfig.json` at or above `fromDir`, or null. */
+export function findTsconfigPath(fromDir: string): string | null {
+  let dir = fromDir;
+  for (let depth = 0; depth < 64; depth++) {
+    const st = statOrNull(join(dir, 'tsconfig.json'));
+    if (st && st.isFile()) return join(dir, 'tsconfig.json');
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+function buildAliases(tsconfig: string): TsconfigAliases {
+  let raw: string;
+  try {
+    raw = readFileSync(tsconfig, 'utf-8');
+  } catch {
+    return EMPTY_ALIASES;
+  }
+  let parsed: { compilerOptions?: { baseUrl?: unknown; paths?: unknown } } | null = null;
+  try {
+    parsed = parseJsonc(raw) as { compilerOptions?: { baseUrl?: unknown; paths?: unknown } } | null;
+  } catch {
+    return EMPTY_ALIASES;
+  }
+  const co = parsed?.compilerOptions;
+  if (!co || typeof co.paths !== 'object' || co.paths === null) return EMPTY_ALIASES;
+  const configDir = dirname(tsconfig);
+  const baseUrl =
+    typeof co.baseUrl === 'string' && co.baseUrl.length > 0 ? resolve(configDir, co.baseUrl) : configDir;
+  const exact = new Map<string, string[]>();
+  const wildcard: TsconfigAliases['wildcard'] = [];
+  for (const [key, value] of Object.entries(co.paths as Record<string, unknown>)) {
+    if (!Array.isArray(value)) continue;
+    const targets = value.filter((t): t is string => typeof t === 'string').map((t) => resolve(baseUrl, t));
+    if (targets.length === 0) continue;
+    const star = key.indexOf('*');
+    if (star === -1) exact.set(key, targets);
+    else wildcard.push({ prefix: key.slice(0, star), suffix: key.slice(star + 1), targets });
+  }
+  // Longest prefix first so a specific alias (`@app/`) beats a broad one (`@/`).
+  wildcard.sort((a, b) => b.prefix.length - a.prefix.length);
+  return { exact, wildcard };
+}
+
+function loadAliases(fromDir: string): TsconfigAliases {
+  const tsconfig = findTsconfigPath(fromDir);
+  if (!tsconfig) return EMPTY_ALIASES;
+  const st = statOrNull(tsconfig);
+  if (!st) return EMPTY_ALIASES;
+  const cached = ALIAS_CACHE.get(tsconfig);
+  if (cached && cached.mtimeMs === st.mtimeMs) return cached.aliases;
+  const aliases = buildAliases(tsconfig);
+  if (ALIAS_CACHE.size >= 64) ALIAS_CACHE.clear();
+  ALIAS_CACHE.set(tsconfig, { mtimeMs: st.mtimeMs, aliases });
+  return aliases;
+}
+
+/**
+ * Resolves a tsconfig-alias specifier (`@/x`, `@app/x`) to an existing file via
+ * the nearest tsconfig's `baseUrl` + `paths`, or null when the specifier is not
+ * aliased or no target exists (caller then falls through to normal resolution).
+ */
+export function resolveAliasModule(spec: string, fromDir: string): string | null {
+  const aliases = loadAliases(fromDir);
+  if (aliases.exact.size === 0 && aliases.wildcard.length === 0) return null;
+  const candidates: string[] = [];
+  const exact = aliases.exact.get(spec);
+  if (exact) candidates.push(...exact);
+  for (const w of aliases.wildcard) {
+    if (spec.startsWith(w.prefix) && spec.endsWith(w.suffix) && spec.length >= w.prefix.length + w.suffix.length) {
+      const middle = spec.slice(w.prefix.length, spec.length - w.suffix.length);
+      candidates.push(...w.targets.map((t) => t.replace('*', middle)));
+    }
+  }
+  for (const candidate of candidates) {
+    const found = probeFile(candidate);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * Resolves a relative import specifier to an absolute file path for a bundler
+ * (esbuild/rollup) to consume. An explicit extension is preserved — `./x.ts`
+ * stays `./x.ts` and must never become `./x.ts.ts`. An extensionless specifier
+ * is probed against `EXTENSIONS` (then `.vsk`, so component imports resolve),
+ * and falls back to `.ts` so the bundler reports the missing file by name.
+ * tsconfig `paths` aliases (`@/x`, `@app/x`) resolve against the app tsconfig;
+ * other bare/absolute specifiers are returned unchanged. This is the single
+ * source of truth for every relative-import rewrite (SSR loader and client
+ * chunk bundler).
+ */
+export function resolveImportPath(spec: string, fromDir: string): string {
+  if (spec.startsWith('./') || spec.startsWith('../')) {
+    const base = resolve(fromDir, spec);
+    if (extname(base)) return base;
+    for (const suffix of EXTENSIONS) {
+      if (existsSync(base + suffix)) return base + suffix;
+    }
+    if (existsSync(`${base}.vsk`)) return `${base}.vsk`;
+    return `${base}.ts`;
+  }
+  if (!isAbsolute(spec)) {
+    const aliased = resolveAliasModule(spec, fromDir);
+    if (aliased) return aliased;
+  }
+  return spec;
+}
+
 /**
  * Resolves a specifier to an absolute file path (or a `BUILTIN_PREFIX` marker
  * for Node builtins). Relative/absolute localities use extension probing;
- * bare specifiers (`npm-package`, `pkg/subpath`, `node:fs`, `fs`) prefer
+ * tsconfig `paths` aliases (`@/x`, `@app/x`) resolve against the app tsconfig;
+ * other bare specifiers (`npm-package`, `pkg/subpath`, `node:fs`, `fs`) prefer
  * Node's own resolver — which understands `exports` maps, conditions, scoped
  * packages and builtins — and fall back to a `node_modules` walk-up.
  *
@@ -668,6 +838,10 @@ export function resolveSsrModule(specifier: string, fromDir: string): string | n
   } else if (specifier.startsWith('./') || specifier.startsWith('../')) {
     resolved = probeFile(resolve(fromDir, specifier));
   } else {
+    // tsconfig `paths` alias (`@/x`, `@app/x`) — resolved before Node's
+    // resolver so app-local aliases win over any same-named package.
+    const aliased = resolveAliasModule(specifier, fromDir);
+    if (aliased) return toRealPath(aliased);
     // Bare specifier — prefer the native resolver (exports map, conditions,
     // builtins, symlinks), then fall back to a node_modules walk-up.
     const native = nativeResolve(specifier, fromDir);
@@ -739,7 +913,7 @@ function loadBuiltin(name: string): Record<string, unknown> | null {
   }
 }
 
-function statOrNull(p: string): { isFile: () => boolean; isDirectory: () => boolean } | null {
+function statOrNull(p: string): { isFile: () => boolean; isDirectory: () => boolean; mtimeMs: number } | null {
   try {
     return statSync(p);
   } catch {

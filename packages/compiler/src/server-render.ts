@@ -53,21 +53,26 @@ function compileFileInternal(source: string, sourcePath: string | undefined, see
     for (const importPath of collectVskImportPaths(ir.imports, sourcePath)) {
       if (seenImportFiles.has(importPath)) continue;
       seenImportFiles.add(importPath);
+      // Only truly unresolvable imports are skipped. A `.vsk` file that EXISTS
+      // but fails to compile must surface its error — silently dropping it here
+      // corrupts the component registry (the caller later crashes on
+      // `undefined.__veskScope` with no pointer back to the real cause).
+      let importedSrc: string;
       try {
-        const importedSrc = readFileSync(importPath, 'utf-8');
-        const sub = compileFileInternal(importedSrc, importPath, seenImportFiles);
-        for (const [name, fn] of sub.componentMap) {
-          if (!componentMap.has(name)) componentMap.set(name, fn);
-        }
-        // Hoist the sub-`.vsk`'s scope into this file's so that
-        // registry-hoisted sub components (called with this `__vesk`) can
-        // destructure runtime imports, module values and top-level helpers.
-        for (const key of Object.keys(sub.__vesk)) {
-          if (key in __vesk) continue;
-          __vesk[key] = sub.__vesk[key];
-        }
+        importedSrc = readFileSync(importPath, 'utf-8');
       } catch {
-        // skip unresolvable imports
+        continue;
+      }
+      const sub = compileFileInternal(importedSrc, importPath, seenImportFiles);
+      for (const [name, fn] of sub.componentMap) {
+        if (!componentMap.has(name)) componentMap.set(name, fn);
+      }
+      // Hoist the sub-`.vsk`'s scope into this file's so that
+      // registry-hoisted sub components (called with this `__vesk`) can
+      // destructure runtime imports, module values and top-level helpers.
+      for (const key of Object.keys(sub.__vesk)) {
+        if (key in __vesk) continue;
+        __vesk[key] = sub.__vesk[key];
       }
     }
   }

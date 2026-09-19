@@ -204,6 +204,16 @@ try {
     assert(cbSrc.includes('__vesk_hmr_eval'), 'appendHmrGlobals eval hook intact');
     assert(existsSync(clientBundleSrcPath), 'client-bundle.ts exists (not deleted/renamed)');
   }
+
+  // ── SSR 500 catches render the unified dev error page (same overlay as HMR) ──
+  {
+    const rich = (devSrc.match(/renderSsrErrorPage\(e, url\.pathname\)/g) || []).length;
+    assert(rich === 2, `both legacy SSR 500 catches use renderSsrErrorPage (got ${rich})`);
+    // The only bare-500 HTML left is the renderSsrErrorPage fallback itself.
+    const bare = (devSrc.match(/<h1>500<\/h1><pre>Internal Server Error<\/pre>/g) || []).length;
+    assert(bare === 1, `no bare-500 HTML outside the renderSsrErrorPage fallback (got ${bare})`);
+    assert(devSrc.includes("from './ssr-error'"), 'dev-server.ts imports resolve/render from ./ssr-error');
+  }
 } finally {
   __internals.runNpm = origRunNpm;
   rmSync(base, { recursive: true, force: true });

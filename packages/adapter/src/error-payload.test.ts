@@ -81,6 +81,26 @@ try {
     assert(Array.isArray(p.tips) && Array.isArray(p.suggestions) && Array.isArray(p.nextSteps), 'loc case: tips/suggestions/nextSteps arrays present');
   }
 
+  // --- VeskError-style .code is surfaced on the payload ---
+  {
+    const p = buildErrorPayload(
+      { message: 'Reactive read outside a tracked scope', line: 15, column: 3, code: 'V0412' },
+      'app/page.vsk',
+      { appDir: tmp },
+    );
+    assert(p.code === 'V0412', 'code case: VeskError code V0412 flows onto the payload');
+    assert(p.line === 15 && p.column === 3, 'code case: line/column preserved alongside the code');
+    assert(p.file === 'app/page.vsk', 'code case: file preserved');
+  }
+  {
+    const p = buildErrorPayload(
+      { message: 'Reactive read outside a tracked scope', line: 15, column: 3 },
+      'app/page.vsk',
+      { appDir: tmp },
+    );
+    assert(p.code === undefined, 'code case: no code on the source error → no payload code');
+  }
+
   // --- " in <file>" redundant suffix is stripped from the message ---
   {
     const abs = join(tmp, 'page.vsk');

@@ -5,10 +5,11 @@ import { tmpdir } from 'node:os';
 import { build } from './esbuild-fallback.js';
 import { stripCodeTypes } from '@vesk/compiler/src/strip-ts';
 import { parse } from '@vesk/compiler/src/parser';
-import { compileClient, compileClientBoth } from '@vesk/compiler/src/client-codegen';
+import { compileClient, compileClientBoth, nameAllocFor } from '@vesk/compiler/src/client-codegen';
 import { resolveComponentName } from '@vesk/compiler/src/server-codegen';
 import { collectVskImportPaths, vskImportLines } from '@vesk/compiler/src/vsk-imports';
 import { inlineMdContentAttrs, guessProjectRoots } from '@vesk/compiler/src/md-inline';
+import { resolveImportPath, findTsconfigPath } from '@vesk/compiler/src/module-imports';
 import type { RouteNode, ClientBundleOptions, ClientBundleResult, ChunkEntry, MonolithicBundleParts, ClientBundleChunkSpec, ClientBundleFileEntry } from '@vesk/adapter/src/types';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -246,21 +247,6 @@ interface ChunkSpecifier {
 }
 
 /**
- * Rewrites a compiled file's source specifier so esbuild can resolve it from
- * the temp bundle entry. Bare package specifiers (e.g. `lucide-vesk`) stay
- * as-is; relative specifiers are resolved to absolute filesystem paths with a
- * `.ts` extension appended so esbuild loads the module as TypeScript and
- * inlines its exported values. Offset-based on the parser AST — never a text
- * scan.
- */
-function resolveImportSource(src: string, filePath: string): string {
-  if (src.startsWith('./') || src.startsWith('../')) {
-    return resolve(dirname(filePath), src) + '.ts';
-  }
-  return src;
-}
-
-/**
  * Accumulates every import a code-split chunk needs and rebuilds it as a
  * single deduped import block.
  *
@@ -314,7 +300,7 @@ class ChunkImports {
       if (node.type !== 'ImportDeclaration' || typeof node.start !== 'number' || typeof node.end !== 'number') continue;
       const src = node.source?.value;
       if (typeof src !== 'string') continue;
-      const resolved = resolveImportSource(src, filePath);
+      const resolved = resolveImportPath(src, dirname(filePath));
       for (const spec of node.specifiers ?? []) {
         const s = spec as { type?: string; local?: { name?: string }; imported?: { name?: string } };
         const local = s.local?.name;
@@ -815,6 +801,9 @@ export async function generateClientBundle(
         const toBundle = `const __components = globalThis.__components || (globalThis.__components = {});\nconst __hydrators = globalThis.__hydrators || (globalThis.__hydrators = {});\n${entry.code}\n`;
         writeFileSync(tmpFile, toBundle);
         try {
+          // Pass the app tsconfig so esbuild resolves tsconfig `paths` aliases
+          // (`@/x`, `@app/x`) inside transitively bundled modules too.
+          const appTsconfig = findTsconfigPath(appDir);
           const result = await build({
             entryPoints: [tmpFile],
             bundle: true,
@@ -823,6 +812,7 @@ export async function generateClientBundle(
             write: false,
             logLevel: 'silent',
             loader: { '.js': 'tsx' },
+            ...(appTsconfig ? { tsconfig: appTsconfig } : {}),
           });
           finalCode = result.outputFiles[0].text;
         } catch (e) {
@@ -879,8 +869,11 @@ export async function generateClientBundle(
 
       resolveVskImports(filePath, (p, n) => compileFileMono(p, n || ''));
 
-      const compCode = compileClient(src, null, { forceClient: true, sourcePath: filePath });
-      const hydCode = compileClient(src, null, { hydrate: true, forceClient: true, includeTopLevel: false, sourcePath: filePath });
+      // Share one name allocator so the comp and hyd contributions (which are
+      // joined into a single scoped block below) never reuse `$n` names.
+      const monoAlloc = nameAllocFor(filePath);
+      const compCode = compileClient(src, null, { forceClient: true, sourcePath: filePath, nameAllocator: monoAlloc });
+      const hydCode = compileClient(src, null, { hydrate: true, forceClient: true, includeTopLevel: false, sourcePath: filePath, nameAllocator: monoAlloc });
       if (compCode) collectRuntimeImports(compCode);
       if (hydCode) collectRuntimeImports(hydCode);
       // Comp and hyd share the file's top-level bindings — scope together.

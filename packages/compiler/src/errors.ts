@@ -156,6 +156,7 @@ export class VeskError extends Error {
     }
     return new VeskError(msg, {
       ...context,
+      code: context.code || 'V0401',
       suggestions: [name, ...allCandidates.slice(0, 8)],
       nextSteps,
       tip: isBuiltin
@@ -169,6 +170,7 @@ export class VeskError extends Error {
       'class declarations are not supported inside Vesk components.',
       {
         ...context,
+        code: context.code || 'V0402',
         suggestions: [
           'Use a plain object: const obj = { ... };',
           'Use a factory function: function create() { return { ... }; }',
@@ -188,6 +190,7 @@ export class VeskError extends Error {
       `{#server} block found in client island "${compName}". Client islands render on both server and client, so {#server} blocks have no effect.`,
       {
         ...context,
+        code: context.code || 'V0403',
         suggestions: [
           `Remove the {#server} block from "${compName}".`,
           `Or remove the \`client\` keyword from "${compName}" declaration.`,
@@ -206,6 +209,7 @@ export class VeskError extends Error {
       `{#client} block found in component "${compName}", but this component is not a client island. {#client} blocks are only allowed inside components declared with the \`client\` keyword.`,
       {
         ...context,
+        code: context.code || 'V0404',
         suggestions: [
           `Add \`client\`: \`component ${compName} client { ... }\``,
           `Or remove the {#client}...{/client} block.`,
@@ -229,6 +233,7 @@ export class VeskError extends Error {
   static configError(msg: string, validOptions: string[] = [], context: VeskErrorOptions = {}): VeskError {
     return new VeskError(msg, {
       ...context,
+      code: context.code || 'V0405',
       suggestions: validOptions.length ? [`Valid options: ${validOptions.join(', ')}`] : [],
       nextSteps: [
         'Check your vesk.config file for typos.',
@@ -242,6 +247,7 @@ export class VeskError extends Error {
       `Component "${parentName}" renders "<${childName} />", but "<${childName} />" is async and "${parentName}" is not declared async.`,
       {
         ...context,
+        code: context.code || 'V0406',
         suggestions: [
           `Declare the parent async: \`async component ${parentName} ...\``,
         ],
@@ -255,8 +261,27 @@ export class VeskError extends Error {
     );
   }
 
+  static attrJsxElement(context: VeskErrorOptions & { attr?: string } = {}): VeskError {
+    return new VeskError(
+      `Attribute "${context.attr ?? ''}" on an HTML element is given a JSX element value. DOM attributes hold plain values — JSX elements belong to content or to a component prop (where they become a content slot).`,
+      {
+        ...context,
+        code: context.code || 'V0407',
+        suggestions: [
+          'Pass the element as a child instead: <div>{ <yourElement /> }</div>',
+          'If the component accepts it, pass the element as a component prop instead of an HTML attribute.',
+        ],
+        nextSteps: [
+          'Move the JSX element into the element\'s content so it renders as a child node.',
+          'Component props can hold JSX elements — they are threaded as content slots and read back with {props.<name>}.',
+        ],
+        tip: 'JSX elements are content. They render inside an element or travel as a component prop — never as an attribute value on an HTML tag.',
+      },
+    );
+  }
+
   toString(): string {
-    let out = `[vesk] ${this.message}`;
+    let out = this.code ? `[vesk ${this.code}] ${this.message}` : `[vesk] ${this.message}`;
     if (this.file) {
       out += `\n  File: ${this.file}`;
       if (this.line) {
