@@ -1,0 +1,101 @@
+import { Link } from '@vesk/runtime/router'
+import { BuildBadge } from './BuildBadge.vsk'
+
+interface FooterLink {
+	label: string
+	href: string
+	external?: boolean
+}
+
+interface FooterColumn {
+	title: string
+	links: FooterLink[]
+}
+
+const columns: FooterColumn[] = [
+	{
+		title: "Product",
+		links: [
+			{ label: "Overview", href: "/portal" },
+			{ label: "Guides", href: "/portal/guides" },
+			{ label: "Async", href: "/async" },
+		],
+	},
+	{
+		title: "Developers",
+		links: [
+			{ label: "Map", href: "/map" },
+			{ label: "Posts", href: "/posts" },
+			{ label: "Docs", href: "https://example.com/docs", external: true },
+		],
+	},
+	{
+		title: "Company",
+		links: [
+			{ label: "About", href: "/about" },
+			{ label: "Blog", href: "/blog" },
+		],
+	},
+]
+
+export async component PortalFooter {
+	<footer class="portal-footer bg-white">
+		<div class="mx-auto w-full max-w-6xl px-5 py-12">
+			<div class="grid gap-10 lg:grid-cols-[1.2fr_2fr]">
+				<div>
+					<div class="flex items-center gap-2">
+						<span
+							class="grid size-6 place-items-center bg-black font-display text-[11px] font-bold text-white"
+						>
+							P
+						</span>
+						<span class="font-display text-sm font-semibold tracking-tight">portal</span>
+					</div>
+					<p
+						class="mt-4 max-w-[34ch] font-mono text-[11.5px] leading-relaxed text-gray-500"
+					>
+						A layout-stress fixture mirroring a real documentation site footer.
+					</p>
+				</div>
+
+				<div class="grid grid-cols-2 gap-8 sm:grid-cols-3">
+					for (const col of columns) {
+						<div class="portal-col">
+							<p class="eyebrow mb-3">{col.title}</p>
+							<ul class="font-mono text-[12px] list-none m-0 p-0">
+								for (const link of col.links) {
+									<li>
+										if (link.external) {
+											<Link
+												href={link.href}
+												target="_blank"
+												rel="noopener"
+												class="block py-1 text-gray-500 transition-colors hover:text-black no-underline"
+											>
+												{link.label}
+												<span class="text-[10px]">↗</span>
+											</Link>
+										} else {
+											<Link
+												href={link.href}
+												class="block py-1 text-gray-500 transition-colors hover:text-black no-underline"
+											>{link.label}</Link>
+										}
+									</li>
+								}
+							</ul>
+						</div>
+					}
+				</div>
+			</div>
+
+			<div
+				class="mt-12 flex flex-col gap-2 border-t border-gray-200 pt-5 font-mono text-[11px] text-gray-500 sm:flex-row sm:items-center sm:justify-between"
+			>
+				<span>© 2026 Portal · a layout hydration fixture</span>
+				<span>portal <BuildBadge /></span>
+				<p>Test Author (vesk-fixture)</p>
+			</div>
+		</div>
+	</footer>
+}

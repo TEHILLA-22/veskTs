@@ -1,0 +1,7 @@
+// Hermetic stand-in for a live version badge: an async component that
+// suspends on local data (like a registry fetch) and renders mixed
+// text + component content inside the footer bottom row.
+export async component BuildBadge {
+	const posts = await useFetch<{ title: string }[]>('/api/posts?limit=1')
+	<span class="portal-build-badge">build {posts.length > 0 ? posts[0].title : 'empty'}</span>
+}

@@ -1,3 +1,108 @@
+# Vesk — handoff (Sep 19, layout-slot-contract session)
+
+> PC-continue brief. All servers DOWN at handoff (`000` on `:3000/:3100/:4000`).
+> Slot fix is code-complete + unit-green but NOT yet verified live.
+
+## State
+
+- Accidental revert wiped tracked slot work; re-applied from scratch. Untracked
+  files survived: `test-app/app/portal/`, `packages/runtime/src/layout.ts`,
+  `packages/runtime/src/layout.test.ts`.
+- `tests/hydration-test.mjs` TEST 24 (portal) + TEST 18 portal routes were lost
+  in the revert — NOT re-added (servers down, can't verify). Spec in "Next" §6.
+- `test-app/app/layout.vsk` Portal nav link + `test-app/llms.txt` portal rows
+  re-added (route-inventory rule).
+- `VersionBadge.vsk` is original (`timeout:10000, retry:1`, direct await).
+  Do NOT edit it — framework fix must make the original fast + non-fatal.
+
+## What changed (this commit)
+
+- `packages/compiler/src/server-jsgen.ts`: `SlotNode` emits
+  `<!--vsk-slot:sN-->` … `<!--vsk-slot-end:sN-->` (`nextVskId`, exact-id pairing).
+- `packages/compiler/src/client-codegen.ts`: hydrate `SlotNode` emits
+  `createLayoutSlot(walker, parent)` + `props.children(__slot.walker)` +
+  `__slot.track(promise)`; `createLayoutSlot` added to hydrate runtime names.
+- `packages/runtime/src/layout.ts` (new): `findSlotRange` (subtree
+  TreeWalker, nesting-depth-aware open/close pairing, exact-id match),
+  `createLayoutSlot` (`takeMarkers` transfer + scoped walker + async anchor),
+  `trackSlotContent` (insert before slot-end; drop if detached),
+  `auditLayoutSlots` (balance + leftover-in-slot). Depth-0 markers only —
+  nested interiors stay with inner scope.
+- `packages/runtime/src/hydrate.ts`: `HydrateWalker.takeMarkers` (decl +
+  `WalkerEngine` impl + child-walker stub), `reportHydrationIssue`.
+- `packages/runtime/src/index-client.ts`: export layout contract fns + types,
+  `reportHydrationIssue`.
+- `packages/runtime/src/router.ts`: `auditLayoutSlots` after
+  `renderLayoutChain(0)(walker)` (full strategy only, never throws).
+- Tests: `layout.test.ts` (new, 12), client-codegen slot tests rewritten to
+  boundary-walker contract (both modes), server-codegen slot test asserts
+  paired boundaries without pinning `sN`.
+- Fixture: `test-app/app/portal/` (async layout/page/footer+badge, nested
+  `guides/`), root nav + `llms.txt` rows.
+- `vesk-doc` repinned to `0.2.27-ci.1789840853735` tarballs (old `0.2.25` set
+  deleted). test-app pins untouched (refresh aborted).
+
+## Verified green
+
+- `layout.test.ts` 12/12, `hydrate.test.ts` 68/68, `router.test.ts` 86/86,
+  `client-codegen.test.ts` 281/281, `server-codegen.test.ts` 165/165.
+- `npm run typecheck`: NOT confirmed (output cut) — re-run on PC.
+- Live probes: NOT re-run (servers down). Last known: `:3000/portal` +
+  `:3100/portal` clean (`foot 1 / all 2 / vsk 0`); `:4000/docs` had
+  `63→30x tag-mismatch (257 markers unconsumed skipped <!--vsk:t:h2-->)`.
+
+## Traps (learned hard)
+
+1. Served `/_vesk/runtime.js` is a TREE-SHAKEN bundle built from the app's
+   `node_modules` dist — `src`/`packages/dist` edits are invisible until
+   `refresh-testapp-deps` + server restart. Always verify via
+   `curl :PORT/_vesk/runtime.js | grep takeMarkers`.
+2. `node scripts/refresh-testapp-deps.mjs <app>` hangs on `npm install`
+   (>300s). Run with tool timeout `420000`.
+3. `pkill`/`pgrep` often hang 10–120s. Kill by explicit PID, restart with
+   `setsid nohup npx vesk dev -p PORT` from the APP dir (repo root →
+   `no app/ directory`), cold start 60–90s.
+4. Only `/data/data/com.termux/files/usr/bin/chromium-browser` works;
+   `/usr/bin/chromium` is dead. Hydration tests need `CHROMIUM_PATH` + test-app
+   dev on `:3000`.
+5. `npm run dev -p 3000` does NOT forward `-p` (`test-app/package.json`
+   `dev: "vesk dev"`). Use `npm run dev -- -p PORT` or `npx vesk dev -p PORT`.
+
+## Next (PC order)
+
+1. `npm run typecheck` (repo root).
+2. `node scripts/refresh-testapp-deps.mjs test-app`, then `... vesk-doc`
+   (each ~2–5 min, timeout 420000).
+3. Restart `:3000` (test-app), `:3100` (test-app), `:4000` (vesk-doc) from app
+   dirs; wait ~90s; `curl` each `/` → 200.
+4. `curl :4000/_vesk/runtime.js | grep -c takeMarkers` → expect ≥2; probe
+   `:4000/docs` → expect 0 `tag-mismatch`, header visible after reload + 2
+   nav clicks, Menu/X + copy icons persist, no `Maximum update depth`.
+5. Warm-hit `curl` timing per route (cold compile ~4–9s is normal in dev;
+   judge the SECOND hit vs 2000ms). If `VersionBadge` registry fetch still
+   blocks every SSR: framework fix WITHOUT touching `VersionBadge.vsk` —
+   candidates: honor `staleTime` server-side across dev SSR requests
+   (`packages/runtime/src/resource.ts:479` cache is client-only), and/or
+   isolate async-child throw so `Footer` can't 500 the page.
+6. Re-add lost browser coverage to `tests/hydration-test.mjs`: TEST 18 add
+   `/portal`, `/portal/guides` to `FULL_ROUTES` + `DATA_ROUTES` + `SPA_TEXT`
+   (`'Portal posts'`, `'Guides layout'`) + 18d `['/portal',1]` +
+   `['/portal/guides',1]`; new TEST 24 layout-slot integrity — 24a SSR
+   `vsk-slot:<id>` open/close pairing via `fetch`; 24b full load single
+   `portal-nav`/`portal-main`/`portal-footer`, order nav<main<footer, columns
+   exactly once, author 1x, badge 1x, zero `vsk` markers; 24c mobile-menu
+   toggle exactly-once; 24d SPA `/portal`→`/portal/guides` single nested
+   chrome; 24e hard reload on guides; 24f SPA back. Then
+   `CHROMIUM_PATH=… node tests/hydration-test.mjs`.
+7. Full suite only at the end (`node scripts/test.js` builds first — not for
+   iteration).
+
+## Left untracked intentionally
+
+- `emr/` (other scratch app), `tmp/repro-*.ts` (scratch) — not ours, do not commit.
+
+---
+
 # Vesk — handoff (active session, Sep 16)
 
 ## Objective

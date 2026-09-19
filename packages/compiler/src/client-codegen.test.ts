@@ -484,35 +484,45 @@ describe('Client Codegen — wipe-style component children (Link/NavLink)', () =
 
 describe('Client Codegen — layout slot scoping & claimed-sibling appends', () => {
 
-	// A layout slot in hydrate mode must pass the SHARED walker to the children
-	// function. Old behavior scoped a subWalker to the enclosing element, which
-	// eagerly bulk-advanced the marker cursor past ANY remaining markers inside
-	// it — including those of sibling components rendered after the slot (e.g. a
-	// global Footer). Those siblings then claimed fresh (duplicate) elements
-	// while the SSR copies stayed orphaned.
-	bothModes('slot passes shared walker to children function', `
+	// A layout slot in hydrate mode must claim the page on a walker scoped to
+	// the SSR slot boundaries (`<!--vsk-slot:<id>-->`), paired by exact id —
+	// never on the shared cursor and never on a containment subWalker. The
+	// shared cursor drifts on any single claim miss (one miss twins the
+	// footer); a containment subWalker bulk-transfers sibling markers rendered
+	// after the slot (the footer) into the page's walk. Boundary scoping plus
+	// async slot anchoring (`__slot.track`) keeps nav/footer claims out of
+	// page markers and page claims out of footer markers.
+	bothModes('slot scopes children to the SSR slot boundary walker', `
 		component Layout(props) {
 			return <main><div>{props.children}</div></main>;
 		}
 	`, (code, mode) => {
 		if (mode === 'hydrate') {
-			expect(code).toContain('props.children(__hydrate)');
+			expect(code).toContain('createLayoutSlot(__hydrate,');
+			expect(code).toContain('props.children(__slot.walker)');
+			expect(code).toContain('__pendingChild = __slot.track(__child)');
+			expect(code).not.toContain('props.children(__hydrate)');
 			expect(code).not.toContain('props.children(__hydrate.subWalker');
 		} else {
 			expect(code).not.toContain('props.children(__hydrate)');
+			expect(code).not.toContain('createLayoutSlot');
 		}
 	});
 
-	bothModes('statement-mode slot passes shared walker to children function', `
+	bothModes('statement-mode slot scopes children to the SSR slot boundary walker', `
 		component Layout(props) {
 			<main><div>{props.children}</div></main>
 		}
 	`, (code, mode) => {
 		if (mode === 'hydrate') {
-			expect(code).toContain('props.children(__hydrate)');
+			expect(code).toContain('createLayoutSlot(__hydrate,');
+			expect(code).toContain('props.children(__slot.walker)');
+			expect(code).toContain('__pendingChild = __slot.track(__child)');
+			expect(code).not.toContain('props.children(__hydrate)');
 			expect(code).not.toContain('props.children(__hydrate.subWalker');
 		} else {
 			expect(code).not.toContain('props.children(__hydrate)');
+			expect(code).not.toContain('createLayoutSlot');
 		}
 	});
 

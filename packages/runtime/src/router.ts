@@ -2,6 +2,7 @@ import { track, get, set, scope, set_active_block } from '@vesk/runtime/src/ripp
 import { root } from '@vesk/runtime/src/ripple-blocks';
 import { createHydrateWalker, hydrateViewport, hydrateIdle, hydrateOnInteraction, bumpNavEpoch } from '@vesk/runtime/src/hydrate';
 import type { HydrateWalker } from '@vesk/runtime/src/hydrate';
+import { auditLayoutSlots } from '@vesk/runtime/src/layout';
 import { matchRoute, flattenLayoutChain, buildTreeFromMap } from '@vesk/runtime/src/router-match';
 import type { RouteNode, RouteMatch } from '@vesk/runtime/src/router-match';
 import {
@@ -1237,6 +1238,17 @@ async function hydrateInitial(
 
 		const walker = createHydrateWalker(container);
 		await runInBlockWindow(() => renderLayoutChain(0)(walker));
+		// Strict slot audit: with boundary-delimited slot walkers, any marker
+		// surviving inside a slot region (or an unbalanced boundary pair) is a
+		// page/layout divergence — the duplication surface. Deferred strategies
+		// hydrate the slot later by design, so only the full strategy audits.
+		if (!strategy || strategy === 'full') {
+			try {
+				auditLayoutSlots(container);
+			} catch {
+				// Audit must never break rendering.
+			}
+		}
 		setIsHydrating(false);
 	} catch (error: unknown) {
 		setIsHydrating(false);

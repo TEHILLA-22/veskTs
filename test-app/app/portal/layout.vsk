@@ -1,0 +1,15 @@
+import type { Component } from '@vesk/types';
+import { PortalNav } from './components/PortalNav.vsk'
+import { PortalFooter } from './components/PortalFooter.vsk'
+
+interface PortalLayoutProps {
+	children?: Component
+}
+
+async component PortalLayout(props: PortalLayoutProps) {
+	<div class="portal-layout min-h-screen bg-white text-black antialiased">
+		<PortalNav />
+		<main class="portal-main mx-auto w-full max-w-6xl px-5 py-8">{props.children}</main>
+		<PortalFooter />
+	</div>
+}

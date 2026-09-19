@@ -1,0 +1,11 @@
+component GuidesPage() {
+	<Head>
+		<title>Guides — nested layout fixture</title>
+	</Head>
+
+	<h1 class="guides-h1 text-3xl font-bold mb-4">Guides</h1>
+	<p class="text-gray-500 mb-6">
+		Sync page inside two nested async layouts — every slot boundary must
+		pair by id and every chrome region must hydrate exactly once.
+	</p>
+}

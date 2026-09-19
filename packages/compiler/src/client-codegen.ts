@@ -410,8 +410,9 @@ function emitNode(ctx: Ctx, node: IRNode, tracked: Map<string, TrackedInfo>, eff
     if (ctx.hydrate) {
       ctx.push(`if (props.children !== undefined && props.children !== null) {`);
       ctx.push(`  if (typeof props.children === 'function') {`);
-      ctx.push(`    const __child = props.children(${ctx.walker});`);
-      ctx.push(`    if (__child && typeof __child.then === 'function') __pendingChild = __child.then(() => $mount || $root);`);
+      ctx.push(`    const __slot = createLayoutSlot(${ctx.walker}, ${parentVar});`);
+      ctx.push(`    const __child = props.children(__slot.walker);`);
+      ctx.push(`    if (__child && typeof __child.then === 'function') __pendingChild = __slot.track(__child);`);
       ctx.push(`  } else {`);
       ctx.push(`    ${parentVar}.appendChild(props.children);`);
       ctx.push(`  }`);
@@ -2075,7 +2076,7 @@ function emitClientFromIR(ir: IRRoot, options: { forceClient?: boolean; hydrate?
   if (ir.components.some(c => hasKeyedMap(c.body))) runtimeNames.push('reconcile');
   if (options.hydrate && ir.components.some(c => hasKeyedMap(c.body))) runtimeNames.push('reconcileHydrated');
   if (options.hydrate) {
-    const hydrateNames = ['hydrate', 'hydrateViewport', 'hydrateIdle', 'hydrateOnInteraction', 'needsHydration', 'createHydrateWalker', 'collectVskMarkers', 'reactiveProps'];
+    const hydrateNames = ['hydrate', 'hydrateViewport', 'hydrateIdle', 'hydrateOnInteraction', 'needsHydration', 'createHydrateWalker', 'collectVskMarkers', 'reactiveProps', 'createLayoutSlot'];
     for (const name of hydrateNames) {
       if (!runtimeNames.includes(name)) runtimeNames.push(name);
     }

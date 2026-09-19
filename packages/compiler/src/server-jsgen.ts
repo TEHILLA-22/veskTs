@@ -105,7 +105,10 @@ export function irNodeToJS(node: IRNode, importedNames?: Set<string> | null, isA
     ].join('\n');
   }
   if (node instanceof RuntimeStatement) return semicolonizeStatement(transformTracked(node as any, tracked || new Map()));
-  if (node instanceof SlotNode) return `__out.push(props.children || '');`;
+  if (node instanceof SlotNode) {
+    const sid = `s${nextVskId()}`;
+    return `__out.push('<!--vsk-slot:${sid}-->');__out.push(props.children || '');__out.push('<!--vsk-slot-end:${sid}-->');`;
+  }
   if (node instanceof PropSlotRender) return `__out.push(props.${node.propName} || '');`;
   if (node instanceof PropSlot) return '';
   return '';

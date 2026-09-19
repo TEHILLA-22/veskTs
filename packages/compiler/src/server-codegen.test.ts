@@ -1330,7 +1330,20 @@ describe('Async Discipline', () => {
 				<main>{props.children}</main>
 			}
 		`, 'Layout', { children: 'slot' });
-		expect(html).toBe('<main>slot</main>');
+		// The slot contract wraps every `{props.children}` region in an
+		// id-paired boundary (`<!--vsk-slot:sN-->` … `<!--vsk-slot-end:sN-->`)
+		// so the client scopes page claims instead of sharing the cursor.
+		// The sid is process-global monotonic, so assert shape + pairing
+		// without pinning the exact number.
+		expect(html).toContain('<main><!--vsk-slot:');
+		expect(html).toContain('slot<!--vsk-slot-end:');
+		const openIdx = html.indexOf('<!--vsk-slot:');
+		const closeIdx = html.indexOf('<!--vsk-slot-end:');
+		const openId = html.slice(openIdx + '<!--vsk-slot:'.length, html.indexOf('-->', openIdx));
+		const closeId = html.slice(closeIdx + '<!--vsk-slot-end:'.length, html.indexOf('-->', closeIdx));
+		expect(openId.length > 0).toBe(true);
+		expect(closeId).toBe(openId);
+		expect(html.indexOf('</main>')).toBe(html.length - '</main>'.length);
 	});
 });
 

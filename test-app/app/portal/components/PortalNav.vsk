@@ -1,0 +1,60 @@
+import { Link } from '@vesk/runtime/router'
+
+interface PortalNavLink {
+	label: string
+	href: string
+}
+
+interface PortalNavProps {
+	section?: string
+}
+
+const portalLinks: PortalNavLink[] = [
+	{ label: 'overview', href: '/portal' },
+	{ label: 'guides', href: '/portal/guides' },
+	{ label: 'async', href: '/async' },
+	{ label: 'map', href: '/map' },
+]
+
+export component PortalNav(props: PortalNavProps) {
+	const &[open] = track(false)
+
+	<header class="portal-nav sticky top-0 z-40 border-b border-gray-200 bg-white/90">
+		<div class="mx-auto flex w-full max-w-6xl items-center justify-between px-5 py-3">
+			<Link href="/portal" class="flex items-center gap-2 no-underline">
+				<span class="grid size-6 place-items-center bg-black text-[11px] font-bold text-white">P</span>
+				<span class="text-sm font-semibold tracking-tight text-black">portal</span>
+				<span class="hidden font-mono text-[10px] uppercase tracking-[0.2em] text-gray-400 sm:inline">layout-stress</span>
+			</Link>
+			<nav class="hidden items-center gap-6 font-mono text-[11px] text-gray-500 md:flex">
+				for (const l of portalLinks) {
+					<Link href={l.href} class="transition-colors hover:text-black no-underline text-gray-500">{l.label}</Link>
+				}
+				<NavLink href="/portal/guides" class="px-3 py-1.5 text-[11px] no-underline">Guides</NavLink>
+			</nav>
+			<button
+				type="button"
+				aria-label={open ? "Close menu" : "Open menu"}
+				onClick={() => open = !open}
+				class="portal-menu-btn grid size-8 place-items-center border border-gray-200 md:hidden bg-transparent text-black"
+			>
+				if (open) {
+					<span>X</span>
+				} else {
+					<span>M</span>
+				}
+			</button>
+		</div>
+		if (open) {
+			<nav class="portal-mobile-nav border-t border-gray-200 bg-white px-5 py-3 font-mono text-[12px] md:hidden">
+				for (const l of portalLinks) {
+					<Link
+						href={l.href}
+						onClick={() => open = false}
+						class="block border-b border-gray-100 py-2.5 text-gray-500 no-underline"
+					>{l.label}</Link>
+				}
+			</nav>
+		}
+	</header>
+}

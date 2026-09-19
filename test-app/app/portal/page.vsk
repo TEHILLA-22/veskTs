@@ -1,0 +1,35 @@
+interface Post {
+	id: number
+	title: string
+	slug: string
+	excerpt: string
+	author: string
+	tags: string[]
+	date: string
+}
+
+async component PortalPage() {
+	<Head>
+		<title>Portal — layout hydration fixture</title>
+	</Head>
+
+	const posts = await useFetch<Post[]>('/api/posts')
+
+	<h1 class="portal-h1 text-3xl font-bold mb-4">Portal</h1>
+	<p class="text-gray-500 mb-6">
+		Async page inside an async layout with an async footer badge — the
+		shape that used to twin footers and misorder slots after hydration.
+	</p>
+
+	if (posts.length === 0) {
+		<p class="portal-empty">No posts.</p>
+	} else {
+		<h2 class="text-xl font-semibold mt-6 mb-2">Portal posts</h2>
+		for (const post of posts) {
+			<div class="bg-white rounded-lg p-4 mb-3 shadow-sm border border-gray-100">
+				<h3 class="font-semibold">{post.title}</h3>
+				<p class="text-gray-500 text-sm">{post.excerpt}</p>
+			</div>
+		}
+	}
+}

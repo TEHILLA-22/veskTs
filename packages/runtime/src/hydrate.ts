@@ -58,6 +58,16 @@ export interface HydrateWalker {
 	retireDetached?(): void;
 	subWalker(rootEl: HTMLElement): HydrateWalker;
 	/**
+	 * Transfer ownership of an explicit marker subset out of this walk: the
+	 * listed markers are marked claimed here (the cursor skips them) so a
+	 * scoped walker built over the same comments owns them exclusively.
+	 * Used by the layout slot contract (`layout.ts`), which scopes page
+	 * claims to SSR slot boundaries instead of sharing the positional cursor
+	 * with nav/footer claims. Optional — walkers that cannot transfer leave
+	 * the markers in place and the caller falls back to the shared walk.
+	 */
+	takeMarkers?(comments: Comment[]): void;
+	/**
 	 * Claim the SSR element of a keyed list item whose `data-vsk-key` matches
 	 * `key`. Consumes the item's root marker and stamps the element, but leaves
 	 * the item's interior markers in place so the item's own render claims them
@@ -173,6 +183,15 @@ export function isHydrateStrict(): boolean {
 
 export function onHydrationMismatch(handler: HydrationMismatchHandler | null): void {
 	__mismatchHandler = handler;
+}
+
+export function reportHydrationIssue(issue: HydrationIssue): void {
+	if (!__mismatchHandler) return;
+	try {
+		__mismatchHandler(issue);
+	} catch {
+		// Telemetry must never break rendering.
+	}
 }
 
 function devWarn(message: string): void {
@@ -777,6 +796,23 @@ class WalkerEngine implements HydrateWalker {
 		return new WalkerEngine(rootEl, owned.map((m) => m.comment));
 	}
 
+	// Ownership transfer for an explicit marker subset (layout slot contract).
+	// The listed markers are marked claimed here without advancing the cursor:
+	// positional claims skip them, and a scoped walker built over the same
+	// comments owns them exclusively. Exactly one engine owns each marker.
+	takeMarkers(comments: Comment[]): void {
+		let owned: Set<Comment>;
+		try {
+			owned = new Set(comments);
+		} catch {
+			return;
+		}
+		if (owned.size === 0) return;
+		for (const tm of this.markers) {
+			if (tm.state !== 'claimed' && owned.has(tm.comment)) tm.state = 'claimed';
+		}
+	}
+
 	// Retire every unclaimed marker in the whole walk that points at `el`.
 	// Used after a cross-position adopt (relocate): the adopted node moves to
 	// the cursor, so alias markers stacked at its old station would otherwise
@@ -931,6 +967,10 @@ export function createHydrateChildWalker(parentEl: HTMLElement | null): HydrateW
 		},
 		retireDetached() {
 			// Child-walkers hold no marker list; nothing to sweep.
+		},
+		takeMarkers(_comments: Comment[]) {
+			// Child-walkers hold no marker list; nothing to transfer. The
+			// layout slot contract falls back to the shared walk.
 		},
 	};
 }
