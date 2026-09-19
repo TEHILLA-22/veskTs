@@ -404,7 +404,7 @@ removal; never import/emit `batch` (matches repo AGENTS.md rule).
    re-fetches all registry handles for the key.
 
 ### 4.2 Hydration claiming (`hydrate.ts`)
-- SSR emits `<!--vsk-->` comments at reactive boundaries.
+- SSR emits keyed `<!--vsk:…-->` comments at every reactive boundary — `<!--vsk:c:Name-->` for component calls, `<!--vsk:t:tag-->` for static subtrees. No bare markers.
 - `hydrate(container, fn, props)` builds a `createHydrateWalker`, then calls
   `componentFn(props, new Map(), walker)`.
 - `walker.nextElement(tag?)` advances marker index; for each marker it reads
@@ -611,7 +611,7 @@ files present.
   bodies still work.
 - **Change hydration** (`hydrate.ts`) → update `hydrate.test.ts`, add a
   production-hydration test in the root `hydration-test.mjs`, and keep the
-  `<!--vsk-->` / `<!--vsk-hold-->` marker contract in sync with
+  `<!--vsk-->` / `<!--vsk:c:Name-->` marker contract in sync with
   `packages/compiler` (compiler emits the markers).
 - **Change resources** (`resource.ts`) → update `resource.test.ts`; keep the
   SSR handoff globals (`__vsk_ssr_data`/`__vsk_ssr_promises`) and

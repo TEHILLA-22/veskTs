@@ -21,6 +21,8 @@ import {
   ClientBlock,
   HeadBlock,
   SlotNode,
+  PropSlot,
+  PropSlotRender,
 } from '@vesk/compiler/src/ir';
 import type { Expression } from '@vesk/compiler/src/ir';
 import { parse } from '@vesk/compiler/src/parser';
@@ -280,10 +282,32 @@ function indent(code: string, level = 1): string {
   return code.split('\n').map((l) => (l ? pad + l : '')).join('\n');
 }
 
+/** Shared counter for generated `$n` identifiers. */
+export type NameAlloc = { c: number };
+
+/**
+ * Allocates a disjoint `$n` name block per source file. esbuild's bundler
+ * renames colliding top-level symbols when it links a chunk, and on 0.25.x
+ * that rename can leave references inside nested closures pointing at the
+ * pre-rename name — surfacing as `$nNN is not defined` at hydration. Seeding
+ * every file from a hash of its path keeps the names globally unique so the
+ * renamer has nothing to rename. Callers without a `sourcePath` keep the
+ * historical `$n0…` numbering.
+ */
+export function nameAllocFor(sourcePath?: string, start = 0): NameAlloc {
+  if (!sourcePath) return { c: start };
+  let h = 0x811c9dc5;
+  for (let i = 0; i < sourcePath.length; i++) {
+    h ^= sourcePath.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return { c: h * 1_000_000 + start };
+}
+
 class Ctx {
   lines: string[] = [];
   effects: string[] = [];
-  c = 0;
+  alloc: NameAlloc;
   importedNames = new Set<string>();
   linkNames = new Set<string>();
   // Runtime component imports that claim their own SSR root via `nextElement`
@@ -303,10 +327,14 @@ class Ctx {
   asyncComps = new Set<string>();
   isAsyncScope = false;
 
+  constructor(alloc?: NameAlloc) {
+    this.alloc = alloc ?? { c: 0 };
+  }
+
   push(...args: (string | null | undefined | false)[]): void {
     for (const a of args) if (a) this.lines.push(a as string);
   }
-  n(): string { return `$n${this.c++}`; }
+  n(): string { return `$n${this.alloc.c++}`; }
   getCode(): string { return this.lines.join('\n'); }
   flushEffects(): string {
     if (this.effects.length === 0) return '';
@@ -321,8 +349,17 @@ class Ctx {
       lines.push(`if (!document.${guard}) {`);
       lines.push(`\tdocument.${guard} = true;`);
       lines.push(`\tdocument.addEventListener(${JSON.stringify(type)}, (e) => {`);
-      lines.push(`\t\tvar el = e.target.closest('[data-vsk-ev]');`);
-      lines.push(`\t\tif (el && el.${prop}) el.${prop}(e);`);
+      // Walk up from the target to the nearest element that actually has a
+      // handler for this event. Using `closest('[data-vsk-ev]')` alone stops at
+      // the nearest event-capable element even when its handler is undefined
+      // (`<Button/>` forwards an optional onClick that was never passed), which
+      // shadows a real handler on an ancestor (e.g. a Popover trigger wrapper).
+      lines.push(`\t\tvar el = e.target;`);
+      lines.push(`\t\tif (el && el.nodeType !== 1) el = el.parentElement;`);
+      lines.push(`\t\twhile (el && el.nodeType === 1) {`);
+      lines.push(`\t\t\tif (el.${prop}) { el.${prop}(e); break; }`);
+      lines.push(`\t\t\tel = el.parentElement;`);
+      lines.push(`\t\t}`);
       lines.push(`\t});`);
       lines.push(`}`);
     }
@@ -348,7 +385,7 @@ function emitNode(ctx: Ctx, node: IRNode, tracked: Map<string, TrackedInfo>, eff
   if (node instanceof ComponentRef) return null;
   if (node instanceof ComponentCall) return emitComponentCall(ctx, node, tracked, effectsVar, parentVar, compPrefix);
   if (node instanceof OpaqueDynamicRegion) return emitOpaque(ctx, node, tracked, effectsVar, parentVar);
-  if (node instanceof MapRegion) return emitMap(ctx, node, tracked, parentVar);
+  if (node instanceof MapRegion) return emitMap(ctx, node, tracked, effectsVar, parentVar);
   if (node instanceof ServerBlock) return null;
   if (node instanceof ClientBlock) {
     const savedHydrate = ctx.hydrate;
@@ -374,7 +411,7 @@ function emitNode(ctx: Ctx, node: IRNode, tracked: Map<string, TrackedInfo>, eff
       ctx.push(`if (props.children !== undefined && props.children !== null) {`);
       ctx.push(`  if (typeof props.children === 'function') {`);
       ctx.push(`    const __child = props.children(${ctx.walker});`);
-      ctx.push(`    if (__child && typeof __child.then === 'function') __pendingChild = __child.then(() => $root);`);
+      ctx.push(`    if (__child && typeof __child.then === 'function') __pendingChild = __child.then(() => $mount || $root);`);
       ctx.push(`  } else {`);
       ctx.push(`    ${parentVar}.appendChild(props.children);`);
       ctx.push(`  }`);
@@ -388,6 +425,29 @@ function emitNode(ctx: Ctx, node: IRNode, tracked: Map<string, TrackedInfo>, eff
   if (node instanceof WhileLoop) return emitWhileLoop(ctx, node, tracked, parentVar);
   if (node instanceof ForLoop) return emitForLoop(ctx, node, tracked, parentVar);
   if (node instanceof SwitchBlock) return emitSwitchBlock(ctx, node, tracked, parentVar);
+  if (node instanceof PropSlot) return null;
+  if (node instanceof PropSlotRender) {
+    const slotProp = `props.${node.propName}`;
+    if (!parentVar) return null;
+    if (ctx.hydrate) {
+      ctx.push(`if (${slotProp} !== undefined && ${slotProp} !== null) {`);
+      ctx.push(`  if (typeof ${slotProp} === 'function') {`);
+      ctx.push(`    const __child = ${slotProp}(${ctx.walker});`);
+      ctx.push(`    if (__child && typeof __child.then === 'function') __pendingChild = __child.then(() => ${parentVar});`);
+      ctx.push(`  } else if (${slotProp}.nodeType !== undefined) {`);
+      ctx.push(`    ${parentVar}.appendChild(${slotProp});`);
+      ctx.push(`  } else {`);
+      ctx.push(`    ${parentVar}.appendChild(document.createTextNode(String(${slotProp})));`);
+      ctx.push(`  }`);
+      ctx.push(`}`);
+    } else {
+      ctx.push(`if (${slotProp} !== undefined && ${slotProp} !== null) {`);
+      ctx.push(`  if (${slotProp}.nodeType !== undefined) ${parentVar}.appendChild(${slotProp});`);
+      ctx.push(`  else ${parentVar}.appendChild(document.createTextNode(String(${slotProp})));`);
+      ctx.push(`}`);
+    }
+    return null;
+  }
   return null;
 }
 
@@ -425,8 +485,12 @@ function emitStatic(ctx: Ctx, node: StaticNode, tracked: Map<string, TrackedInfo
     }
   }
 
+  const dynAttrNames = new Set<string>();
+  for (const d of dynAttrs) if (d.target) dynAttrNames.add(d.target);
+
   for (const attr of node.attributes) {
     if (attr.name.startsWith('on') && attr.name.length > 2) continue;
+    if (dynAttrNames.has(attr.name)) continue;
     if (attr.value === '') {
       ctx.push(`${el}.setAttribute(${JSON.stringify(attr.name)}, '');`);
     } else {
@@ -434,9 +498,24 @@ function emitStatic(ctx: Ctx, node: StaticNode, tracked: Map<string, TrackedInfo
     }
   }
 
+  // Hydrate-mode A5 snapshot: exactly one text-ish child that is a reactive
+  // dynamic binding gets initialized from the claimed parent's SSR text.
+  // Computed only in hydrate mode — normal mode pays zero for this.
+  let singleReactiveText = false;
+  if (ctx.hydrate) {
+    const textKids = children.filter((c) => c instanceof TextNode || (c instanceof DynamicBinding && c.kind === 'text'));
+    singleReactiveText = textKids.length === 1 && textKids[0] instanceof DynamicBinding
+      && isReactiveExpression((textKids[0] as DynamicBinding).expression, tracked);
+  }
+
   let residueBefore = 0;
   for (const child of children) {
-    const childVar = emitNode(ctx, child, tracked, effectsVar, el);
+    let childVar: string | null;
+    if (singleReactiveText && child instanceof DynamicBinding && child.kind === 'text') {
+      childVar = emitDynamicBinding(ctx, child, tracked, effectsVar, `${el}.__vsk_ssrText`);
+    } else {
+      childVar = emitNode(ctx, child, tracked, effectsVar, el);
+    }
     if (childVar) {
       if (ctx.hydrate) {
         // Fresh text nodes (static or dynamic) cannot be appended at the end of
@@ -479,18 +558,26 @@ function emitStatic(ctx: Ctx, node: StaticNode, tracked: Map<string, TrackedInfo
         ctx.push(`${el}.${prop} = ${handler};`);
       }
       ctx.push(`${el}.setAttribute('data-vsk-ev', '');`);
-    } else {
-      const expr = transformTracked(attr.expression as any, tracked);
-      const useProp = PROPERTY_ATTRS[node.tag]?.has(target);
-      const eff = useProp
-        ? `effect(() => { ${el}.${target} = ${expr}; })`
-        : `effect(() => { ${el}.setAttribute(${JSON.stringify(target)}, String(${expr})); })`;
-      if (effectsVar) {
-        ctx.push(`${effectsVar}.push(${eff});`);
+      } else if (target === 'style') {
+        const expr = transformTracked(attr.expression as any, tracked);
+        const eff = `effect(() => { applyStyle(${el}, ${expr}); })`;
+        if (effectsVar) {
+          ctx.push(`${effectsVar}.push(${eff});`);
+        } else {
+          ctx.effects.push(`${eff};`);
+        }
       } else {
-        ctx.effects.push(`${eff};`);
+        const expr = transformTracked(attr.expression as any, tracked);
+        const useProp = PROPERTY_ATTRS[node.tag]?.has(target);
+        const eff = useProp
+          ? `effect(() => { ${el}.${target} = ${expr}; })`
+          : `effect(() => { const __v = ${expr}; if (__v != null && __v !== false) ${el}.setAttribute(${JSON.stringify(target)}, __v === true ? 'true' : String(__v)); })`;
+        if (effectsVar) {
+          ctx.push(`${effectsVar}.push(${eff});`);
+        } else {
+          ctx.effects.push(`${eff};`);
+        }
       }
-    }
   }
 
   return el;
@@ -630,7 +717,7 @@ function isReactiveExpression(node: any, tracked: Map<string, TrackedInfo>): boo
   return reactive;
 }
 
-function emitDynamicBinding(ctx: Ctx, node: DynamicBinding, tracked: Map<string, TrackedInfo>, effectsVar: string | null): string | null {
+function emitDynamicBinding(ctx: Ctx, node: DynamicBinding, tracked: Map<string, TrackedInfo>, effectsVar: string | null, ssrTextExpr: string | null = null): string | null {
   if (node.kind === 'attribute') return null;
   const expr = transformTracked(node.expression as any, tracked);
   const v = ctx.n();
@@ -638,7 +725,13 @@ function emitDynamicBinding(ctx: Ctx, node: DynamicBinding, tracked: Map<string,
     ctx.push(`const ${v} = document.createTextNode(String(${expr}));`);
     return v;
   }
-  ctx.push(`const ${v} = document.createTextNode('');`);
+  // Hydrate-mode sole-dynamic-text snapshot (Hydrate-Todo A5): initialize from
+  // the claimed parent's stashed SSR text so a missed effect degrades to stale
+  // text instead of an empty element. The effect below still overwrites on its
+  // first run, so live values are unaffected. Fresh (unclaimed) parents stash
+  // nothing and the `?? ''` keeps the old empty initial.
+  const init = ssrTextExpr ? `String(${ssrTextExpr} ?? '')` : `''`;
+  ctx.push(`const ${v} = document.createTextNode(${init});`);
   const eff = `effect(() => { ${v}.data = String(${expr}); })`;
   if (effectsVar) {
     ctx.push(`${effectsVar}.push(${eff});`);
@@ -646,6 +739,28 @@ function emitDynamicBinding(ctx: Ctx, node: DynamicBinding, tracked: Map<string,
     ctx.effects.push(`${eff};`);
   }
   return v;
+}
+
+/**
+ * Emits a fresh DocumentFragment built from `nodes` (used for both the
+ * `children` of a component call and every named content slot). Children
+ * effects are collected into `effectsVar` (or `ctx.effects`) exactly as the
+ * component-call path does today, so slot bodies inherit identical effects,
+ * claim, and async semantics as regular children.
+ */
+function emitFragment(ctx: Ctx, nodes: IRNode[], tracked: Map<string, TrackedInfo>, effectsVar: string | null): string {
+  const frag = ctx.n();
+  const savedEffects = ctx.effects;
+  ctx.effects = [];
+  ctx.push(`const ${frag} = (() => { const $f = document.createDocumentFragment();`);
+  for (const child of nodes) {
+    const childVar = emitNode(ctx, child, tracked, effectsVar, '$f');
+    if (childVar) ctx.push(`$f.appendChild(${childVar});`);
+  }
+  for (const eff of ctx.effects) ctx.push(effectsVar ? `${effectsVar}.push(${effectBlockToHandlerExpr(eff)});` : eff);
+  ctx.effects = savedEffects;
+  ctx.push(`return $f; })();`);
+  return frag;
 }
 
 function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, TrackedInfo>, effectsVar: string | null, parentVar?: string, compPrefix = '__components'): string | null {
@@ -664,7 +779,6 @@ function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, T
     propsEntries.push(`...${expr}`);
   }
 
-  const propsObj = `{ ${propsEntries.join(', ')} }`;
   const v = ctx.n();
   // Await children whenever the calling scope is async. Async-ness is
   // parent-driven (mirroring the server side) so that imported async
@@ -674,6 +788,11 @@ function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, T
   // Member-expression tags (`<it.icon>`) carry the raw component-valued
   // expression — invoke it directly; it is never a registry name.
   const calleeExpr = node.calleeExpr ? `(${node.calleeExpr})` : null;
+  // Named content slots (`trigger={<Button/>}`) thread through the same channel
+  // as `children`: a fresh DocumentFragment per slot hoisted from the IR.
+  const slotChildren = node.children.filter((c): c is PropSlot => c instanceof PropSlot);
+  const regChildren = node.children.filter((c) => !(c instanceof PropSlot));
+  const callArgs = () => `{ ${propsEntries.join(', ')} }`;
   if (ctx.hydrate) {
     const access = calleeExpr
       ?? (ctx.importedNames.has(node.componentName)
@@ -699,18 +818,19 @@ function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, T
         ctx.push(`${walkerArg}.retireDetached();`);
       }
     };
-    if (node.children.length > 0) {
+    for (const slot of slotChildren) {
+      const frag = emitFragment(ctx, slot.body, tracked, effectsVar);
+      propsEntries.push(`${JSON.stringify(slot.propName)}: ${frag}`);
+    }
+    if (regChildren.length > 0) {
       const frag = ctx.n();
-      ctx.push(`const ${frag} = (() => { const $f = document.createDocumentFragment();`);
-      const savedEffects = ctx.effects;
-      // Link/NavLink hydrate branches WIPE their SSR anchor (a.replaceChildren())
-      // and remount the children fragment. Suppressed fully-static children would
-      // therefore be lost, so rebuild the whole subtree fresh instead of claiming.
       const wipeMount = ctx.linkNames.has(node.componentName);
       const savedHydrate = ctx.hydrate;
       if (wipeMount) ctx.hydrate = false;
+      ctx.push(`const ${frag} = (() => { const $f = document.createDocumentFragment();`);
+      const savedEffects = ctx.effects;
       ctx.effects = [];
-      for (const child of node.children) {
+      for (const child of regChildren) {
         const childVar = emitNode(ctx, child, tracked, effectsVar, '$f');
         if (childVar) ctx.push(`$f.appendChild(${childVar});`);
       }
@@ -719,22 +839,22 @@ function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, T
       ctx.hydrate = savedHydrate;
       ctx.push(`return $f; })();`);
       propsEntries.push(`children: ${frag}`);
-      ctx.push(`const ${v} = ${awaitKw}${access}({ ${propsEntries.join(', ')} }, __registry, ${walkerArg});`);
-      maybeReplace(v);
-      maybeRetire();
-      return v;
     }
-    ctx.push(`const ${v} = ${awaitKw}${access}(${propsObj}, __registry, ${walkerArg});`);
+    ctx.push(`const ${v} = ${awaitKw}${access}(${callArgs()}, __registry, ${walkerArg});`);
     maybeReplace(v);
     maybeRetire();
     return v;
   } else {
-    if (node.children.length > 0) {
+    for (const slot of slotChildren) {
+      const frag = emitFragment(ctx, slot.body, tracked, effectsVar);
+      propsEntries.push(`${JSON.stringify(slot.propName)}: ${frag}`);
+    }
+    if (regChildren.length > 0) {
       const frag = ctx.n();
-      ctx.push(`const ${frag} = (() => { const $f = document.createDocumentFragment();`);
       const savedEffects = ctx.effects;
       ctx.effects = [];
-      for (const child of node.children) {
+      ctx.push(`const ${frag} = (() => { const $f = document.createDocumentFragment();`);
+      for (const child of regChildren) {
         const childVar = emitNode(ctx, child, tracked, effectsVar, '$f');
         if (childVar) ctx.push(`$f.appendChild(${childVar});`);
       }
@@ -744,11 +864,11 @@ function emitComponentCall(ctx: Ctx, node: ComponentCall, tracked: Map<string, T
       propsEntries.push(`children: ${frag}`);
     }
     if (calleeExpr) {
-      ctx.push(`const ${v} = ${calleeExpr}({ ${propsEntries.join(', ')} });`);
+      ctx.push(`const ${v} = ${calleeExpr}(${callArgs()});`);
     } else if (ctx.importedNames.has(node.componentName)) {
-      ctx.push(`const ${v} = ${awaitKw}${node.componentName}({ ${propsEntries.join(', ')} });`);
+      ctx.push(`const ${v} = ${awaitKw}${node.componentName}(${callArgs()});`);
     } else {
-      ctx.push(`const ${v} = ${awaitKw}${compPrefix}[${JSON.stringify(node.componentName)}]({ ${propsEntries.join(', ')} });`);
+      ctx.push(`const ${v} = ${awaitKw}${compPrefix}[${JSON.stringify(node.componentName)}](${callArgs()});`);
     }
   }
   return v;
@@ -1338,7 +1458,7 @@ function emitSwitchBlock(ctx: Ctx, node: SwitchBlock, tracked: Map<string, Track
   return null;
 }
 
-function emitMap(ctx: Ctx, node: MapRegion, tracked: Map<string, TrackedInfo>, parentVar?: string): string | null {
+function emitMap(ctx: Ctx, node: MapRegion, tracked: Map<string, TrackedInfo>, effTarget: string | null, parentVar?: string): string | null {
   const arrExpr = transformTracked(node.expression as any, tracked);
   const itemVar = node.itemVariable;
   const anchor = ctx.n();
@@ -1358,6 +1478,26 @@ function emitMap(ctx: Ctx, node: MapRegion, tracked: Map<string, TrackedInfo>, p
   // emitting a top-level effect there would reference the loop/statement local
   // (`col`, `pages`) which is out of scope — `ReferenceError` at hydrate.
   const reactiveSource = isReactiveExpression(node.expression as any, tracked);
+
+  // The re-render effect below closes over the anchors/reconciler declared
+  // inline above. When this map is nested inside a branch/item builder those
+  // bindings live in that nested closure — so the effect must be created in
+  // the same scope (registered on the enclosing effects array), not flushed
+  // to the component top level where the names are out of scope
+  // (`$nNN is not defined` at hydration, plus an esbuild shadowing rename).
+  const pushEffect = (lets: string, effCall: string): void => {
+    if (effTarget) {
+      ctx.push(`${effTarget}.push((() => {
+    ${lets}
+    return ${effCall};
+  })());`);
+    } else {
+      ctx.effects.push(`{
+  ${lets}
+  ${effCall};
+}`);
+    }
+  };
 
   ctx.push(`const ${anchor} = document.createComment('map');`);
   if (!hyd && !hydKeyed) ctx.push(`${parent}.appendChild(${anchor});`);
@@ -1437,6 +1577,13 @@ function emitMap(ctx: Ctx, node: MapRegion, tracked: Map<string, TrackedInfo>, p
 
   if (node.keyExpr) {
     const keyExpr = transformTracked(node.keyExpr as any, tracked);
+    // A `key` may reference the loop's `index` variable (`for (… ; key i; index i)`).
+    // The key function is evaluated outside the item renderer (where the index is
+    // in scope), so it must receive the index as its own parameter — otherwise the
+    // emitted `item => i` key closes over an undefined `i` (ReferenceError).
+    // Parenthesize the parameters: without them `item, i => …` parses as a comma
+    // sequence expression rather than a two-parameter arrow in argument position.
+    const keyFnSrc = `(${itemVar}${node.indexVariable ? `, ${node.indexVariable}` : ''}) => ${keyExpr}`;
     const reconciler = ctx.n();
     const initList = ctx.n();
     ctx.push(`let ${reconciler} = () => {};`);
@@ -1445,9 +1592,9 @@ function emitMap(ctx: Ctx, node: MapRegion, tracked: Map<string, TrackedInfo>, p
       // inside `parent` (pre-attach, `anchor.parentNode` is null) and peeks all
       // keys before claim-by-key consumes the walker, so server-rendered items
       // are adopted and wired in place instead of being rebuilt.
-      ctx.push(`const ${initList} = () => { ${reconciler} = reconcileHydrated(${anchor}, ${endAnchor}, ${arrExpr}, ${itemVar} => ${keyExpr}, (${itemVar}, __i, __e, __root) => ${renderItem}(${itemVar}${indexParam ? ', __i, __e' : ', __e'}, null, __root), __hydrate, ${parent}); };`);
+      ctx.push(`const ${initList} = () => { ${reconciler} = reconcileHydrated(${anchor}, ${endAnchor}, ${arrExpr}, ${keyFnSrc}, (${itemVar}, __i, __e, __root) => ${renderItem}(${itemVar}${indexParam ? ', __i, __e' : ', __e'}, null, __root), __hydrate, ${parent}); };`);
     } else {
-      ctx.push(`const ${initList} = () => { ${reconciler} = reconcile(${anchor}, ${endAnchor}, ${arrExpr}, ${itemVar} => ${keyExpr}, (${itemVar}, __i, __e) => ${renderItem}(${itemVar}${indexParam ? ', __i, __e' : ', __e'})); };`);
+      ctx.push(`const ${initList} = () => { ${reconciler} = reconcile(${anchor}, ${endAnchor}, ${arrExpr}, ${keyFnSrc}, (${itemVar}, __i, __e) => ${renderItem}(${itemVar}${indexParam ? ', __i, __e' : ', __e'})); };`);
     }
 
     if (emptyRenderName) {
@@ -1455,9 +1602,7 @@ function emitMap(ctx: Ctx, node: MapRegion, tracked: Map<string, TrackedInfo>, p
       ctx.push(`let ${isEmptyVar} = !${hasItems}();`);
       ctx.push(`if (!${isEmptyVar}) { ${initList}(); } else { ${aw}${emptyRenderName}(); }`);
       if (!reactiveSource) return null;
-      ctx.effects.push(`{
-  let __first = true;
-  effect(${effOpen}
+      pushEffect(`let __first = true;`, `effect(${effOpen}
     const __new = ${hasItems}();
     if (__first) { __first = false; __new; return; }
     if (__new !== ${isEmptyVar}) {
@@ -1469,19 +1614,15 @@ function emitMap(ctx: Ctx, node: MapRegion, tracked: Map<string, TrackedInfo>, p
     ${effectsVar}.length = 0;
     __cleanup(${anchor}, ${endAnchor});
     if (__new) { ${initList}(); } else { ${aw}${emptyRenderName}(); }
-  });
-}`);
+  })`);
     } else {
       ctx.push(`${initList}();`);
       if (!reactiveSource) return null;
-      ctx.effects.push(`{
-  let __first = true;
-  effect(() => {
+      pushEffect(`let __first = true;`, `effect(() => {
     const __nv = ${arrExpr};
     if (__first) { __first = false; __nv; ${reconciler}(${arrExpr}); return; }
     ${reconciler}(${arrExpr});
-  });
-}`);
+  })`);
     }
   } else {
     const renderAllItems = (ind: string, collect: string | null): string => {
@@ -1510,9 +1651,7 @@ function emitMap(ctx: Ctx, node: MapRegion, tracked: Map<string, TrackedInfo>, p
       ctx.push(indent(`} else { ${aw}${emptyRenderName}(${collectVar ? collectVar : ''}); }`));
       if (collectVar) ctx.push(`__place(${anchor}, ${endAnchor}, ${collectVar}, ${parent});`);
       if (!reactiveSource) return null;
-      ctx.effects.push(`{
-  let __first = true;
-  effect(${effOpen}
+      pushEffect(`let __first = true;`, `effect(${effOpen}
     const __new = ${hasItems}();
     if (__first) { __first = false; __new; return; }
     if (__new !== ${isEmptyVar}) {
@@ -1531,25 +1670,21 @@ ${renderAllItems('        ', null)}
     if (__new) {
 ${renderAllItems('      ', null)}
     } else { ${aw}${emptyRenderName}(${collectVar ? collectVar : ''}); }
-  });
-}`);
+  })`);
     } else {
       const collectVar = hyd ? ctx.n() : null;
       if (collectVar) ctx.push(`const ${collectVar} = [];`);
       ctx.push(renderAllItems('', collectVar));
       if (collectVar) ctx.push(`__place(${anchor}, ${endAnchor}, ${collectVar}, ${parent});`);
       if (!reactiveSource) return null;
-      ctx.effects.push(`{
-  let __first = true;
-  effect(${effOpen}
+      pushEffect(`let __first = true;`, `effect(${effOpen}
     const __nv = ${arrExpr};
     if (__first) { __first = false; __nv; return; }
     for (const e of ${effectsVar}) destroy_block(e);
     ${effectsVar}.length = 0;
     __cleanup(${anchor}, ${endAnchor});
 ${renderAllItems('    ', null)}
-  });
-}`);
+  })`);
     }
   }
 
@@ -1560,9 +1695,9 @@ function computeAsyncComponents(comps: ComponentIR[]): Set<string> {
   return new Set(comps.filter((c) => c.isAsync).map((c) => c.name));
 }
 
-function generateComponent(comp: ComponentIR, importedNames: Set<string> = new Set(), hydrate = false, asyncComps: Set<string> = new Set(), linkNames: Set<string> = new Set(), selfClaimNames: Set<string> = new Set()): string {
+function generateComponent(comp: ComponentIR, importedNames: Set<string> = new Set(), hydrate = false, asyncComps: Set<string> = new Set(), linkNames: Set<string> = new Set(), selfClaimNames: Set<string> = new Set(), alloc?: NameAlloc): string {
   const tracked = collectTrackedNames(comp.body);
-  const ctx = new Ctx();
+  const ctx = new Ctx(alloc);
   ctx.importedNames = importedNames;
   ctx.linkNames = linkNames;
   ctx.selfClaimNames = selfClaimNames;
@@ -1584,7 +1719,16 @@ function generateComponent(comp: ComponentIR, importedNames: Set<string> = new S
   }
 
   if (ctx.hydrate) {
+    // Two distinct roles must not be conflated:
+    //  - `$root` is the shared page container. It is only ever a last-resort
+    //    mount target for detached dynamic regions (`__place`) that could not
+    //    be claimed in place; it must never be handed back to a caller.
+    //  - `$mount` is THIS component's own first top-level node. It is what the
+    //    hydrator returns so the parent can position/guard the component. A
+    //    component's own node is never an ancestor of the caller, so the
+    //    parent's `contains()` guards and `__place` end-anchor bounds are valid.
     ctx.push(indent(`const $root = __hydrate.root;`));
+    ctx.push(indent(`let $mount = null;`));
   } else {
     ctx.push(indent(`const $root = document.createDocumentFragment();`));
   }
@@ -1604,7 +1748,11 @@ function generateComponent(comp: ComponentIR, importedNames: Set<string> = new S
     const v = emitNode(ctx, node, tracked, null);
     if (v) {
       if (ctx.hydrate) {
-        ctx.push(indent(`if (${v}.parentNode !== $root) { if (!$root || ${v}.parentNode == null || !${v}.parentNode.contains(${v})) $root.appendChild(${v}); }`));
+        // The first top-level node becomes `$mount`. Late top-level nodes are
+        // already in the DOM when claimed; only a divergent fresh node is
+        // nested onto the mount (matching the pre-marker wrapper behaviour).
+        ctx.push(indent(`if ($mount === null) $mount = ${v};`));
+        ctx.push(indent(`if (${v} !== $mount && ${v}.parentNode == null) $mount.appendChild(${v});`));
       } else {
         ctx.push(indent(`$root.appendChild(${v});`));
       }
@@ -1617,7 +1765,14 @@ function generateComponent(comp: ComponentIR, importedNames: Set<string> = new S
   const delCode = ctx.emitDelegates();
   if (delCode) ctx.push(indent(delCode.trim()));
 
-  ctx.push(indent(`return __pendingChild || $root;`));
+  if (ctx.hydrate) {
+    // A hydrator with no claimable nodes must still hand its caller a value the
+    // parent guards can safely inspect (an empty fragment places nothing).
+    ctx.push(indent(`if ($mount === null) $mount = document.createDocumentFragment();`));
+    ctx.push(indent(`return __pendingChild || $mount;`));
+  } else {
+    ctx.push(indent(`return __pendingChild || $root;`));
+  }
   ctx.push(indent(`} finally {`));
   ctx.push(indent(`\tsetActiveComponent(__prev);`));
   ctx.push(indent(`}`));
@@ -1632,7 +1787,7 @@ function buildParamInit(paramNames: string[]): string {
   return `const { ${paramNames.join(', ')} } = props;`;
 }
 
-function buildComponentMap(irRoot: IRRoot, hydrate = false): string {
+function buildComponentMap(irRoot: IRRoot, hydrate = false, alloc?: NameAlloc): string {
   const mapLines: string[] = [];
   mapLines.push(`const __components = {};`);
   const asyncComps = computeAsyncComponents(irRoot.components);
@@ -1673,7 +1828,7 @@ function buildComponentMap(irRoot: IRRoot, hydrate = false): string {
       mapLines.push(`__components[${JSON.stringify(comp.name)}] = ${stub};`);
       continue;
     }
-    const code = generateComponent(comp, directNames, hydrate, asyncComps, linkNames, selfClaimNames);
+    const code = generateComponent(comp, directNames, hydrate, asyncComps, linkNames, selfClaimNames, alloc);
     mapLines.push(`__components[${JSON.stringify(comp.name)}] = ${code};`);
   }
 
@@ -1800,6 +1955,8 @@ function findBindingInIR(nodes: IRNode[], names: Set<string>): boolean {
         if (astHasBinding(prop.value.ast, names)) return true;
       }
       if (findBindingInIR(node.children, names)) return true;
+    } else if (node instanceof PropSlot) {
+      if (findBindingInIR(node.body, names)) return true;
     } else if (node instanceof RuntimeStatement) {
       if (astHasBinding(node.ast, names)) return true;
     } else if (node instanceof StaticNode) {
@@ -1820,6 +1977,9 @@ function findFormNameInIR(nodes: IRNode[], name: string): boolean {
         if (prop.value && prop.value.raw && prop.value.raw.includes(fnPattern)) return true;
       }
       if (findFormNameInIR(node.children, name)) return true;
+    }
+    if (node instanceof PropSlot) {
+      if (findFormNameInIR(node.body, name)) return true;
     }
     if (node instanceof DynamicBinding && node.expression && node.expression.raw) {
       if (node.expression.raw.includes(fnPattern)) return true;
@@ -1881,13 +2041,13 @@ export function escapeHtml(str: string): string {
     .split("'").join('&#39;');
 }
 
-function emitClientFromIR(ir: IRRoot, options: { forceClient?: boolean; hydrate?: boolean; includeTopLevel?: boolean }): string {
+function emitClientFromIR(ir: IRRoot, options: { forceClient?: boolean; hydrate?: boolean; includeTopLevel?: boolean; nameAllocator?: NameAlloc }): string {
   const needsClient = ir.components.some((c) => c.isClient || !isStaticComponent(c));
   if (!options.forceClient && !needsClient) {
     return '';
   }
 
-  const componentMapCode = buildComponentMap(ir, options.hydrate);
+  const componentMapCode = buildComponentMap(ir, options.hydrate, options.nameAllocator);
   const importLines = ir.imports.length > 0 ? ir.imports.join('\n') + '\n' : '';
   const topCode = (options.includeTopLevel === false ? [] : transformTopLevelForActions(ir.topLevelCode, 'client')).join('\n') + '\n';
 
@@ -1903,7 +2063,7 @@ function emitClientFromIR(ir: IRRoot, options: { forceClient?: boolean; hydrate?
   }
   const exportCode = exportLines.join('\n');
 
-  const runtimeNames: string[] = ['track', 'get', 'set', 'destroy_block', 'getActiveComponent', 'setActiveComponent', 'reactiveProps'];
+  const runtimeNames: string[] = ['track', 'get', 'set', 'destroy_block', 'getActiveComponent', 'setActiveComponent', 'reactiveProps', 'applyStyle'];
   if (ir.components.some(c => !isStaticIR(c.body))) runtimeNames.push('effect');
   for (const name of usedRuntimeBindings(ir)) runtimeNames.push(name);
   for (const name of ['derived']) {
@@ -1948,13 +2108,13 @@ ${exportCode}
   return moduleCode.trim();
 }
 
-export function compileClient(source: string, _componentName: string | null, options: { forceClient?: boolean; hydrate?: boolean; includeTopLevel?: boolean; sourcePath?: string; mdRoots?: string[] } = {}): string {
+export function compileClient(source: string, _componentName: string | null, options: { forceClient?: boolean; hydrate?: boolean; includeTopLevel?: boolean; sourcePath?: string; mdRoots?: string[]; nameAllocator?: NameAlloc } = {}): string {
   if (options.sourcePath) {
     source = inlineMdImportsFrom(source, options.sourcePath, options.mdRoots || []);
   }
   const ast = parse(source, options.sourcePath ? { filename: options.sourcePath } : {});
   const ir = generateIR(ast, source, options.sourcePath);
-  return emitClientFromIR(ir, options);
+  return emitClientFromIR(ir, { ...options, nameAllocator: options.nameAllocator ?? nameAllocFor(options.sourcePath) });
 }
 
 /**
@@ -1981,9 +2141,12 @@ export function compileClientBoth(source: string, _componentName: string | null,
     const exportedComp = ir.components.find((c) => c.exported);
     if (exportedComp) name = exportedComp.name;
   }
+  // Comp and hyd land in the same scoped file block, so they share one
+  // allocator: hyd continues after the names comp already consumed.
+  const alloc = nameAllocFor(sourcePath);
   return {
-    comp: emitClientFromIR(ir, { forceClient: true }),
-    hyd: emitClientFromIR(irHyd, { forceClient: true, hydrate: true, includeTopLevel: false }),
+    comp: emitClientFromIR(ir, { forceClient: true, nameAllocator: alloc }),
+    hyd: emitClientFromIR(irHyd, { forceClient: true, hydrate: true, includeTopLevel: false, nameAllocator: alloc }),
     name,
   };
 }

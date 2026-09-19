@@ -198,7 +198,7 @@ async function main() {
     await page.goto(BASE + '/', { waitUntil: 'networkidle0' });
 
     // No hydration markers should remain
-    const markers = await page.evaluate(() => document.body.innerHTML.match(/<!--vsk-->/g) || []);
+    const markers = await page.evaluate(() => document.body.innerHTML.match(/<!--vsk(--|:)/g) || []);
     assert(markers.length === 0, 'All hydration markers consumed');
 
     // nav links present

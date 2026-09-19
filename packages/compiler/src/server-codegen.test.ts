@@ -511,7 +511,7 @@ describe('Statement Mode Server Rendering', () => {
 				return <ul>{props.items.map((item) => <li key={item.id}>{item.name}</li>)}</ul>;
 			}
 		`, 'App', { items: [{ id: 1, name: 'A' }, { id: 2, name: 'B' }] }, new Map(), { hydrate: true });
-		expect(html).toBe('<!--vsk--><ul><!--vsk--><li data-vsk-key="1">A</li><!--vsk--><li data-vsk-key="2">B</li></ul>');
+		expect(html).toBe('<!--vsk:t:ul--><ul><!--vsk:t:li--><li data-vsk-key="1">A</li><!--vsk:t:li--><li data-vsk-key="2">B</li></ul>');
 	});
 	it('hydrate SSR stamps data-vsk-key on statement-mode keyed for-of roots', () => {
 		const html = render(`
@@ -523,7 +523,7 @@ describe('Statement Mode Server Rendering', () => {
 				</ul>
 			}
 		`, 'App', { todos: [{ id: 7, text: 'X' }] }, new Map(), { hydrate: true });
-		expect(html).toBe('<!--vsk--><ul><!--vsk--><li data-vsk-key="7">X</li></ul>');
+		expect(html).toBe('<!--vsk:t:ul--><ul><!--vsk:t:li--><li data-vsk-key="7">X</li></ul>');
 	});
 	it('non-hydrate SSR emits no markers or data-vsk-key', () => {
 		const html = render(`
@@ -547,7 +547,7 @@ describe('Statement Mode Server Rendering', () => {
 			}
 		`, 'App', {}, new Map(), { hydrate: true });
 		// the initially-rendered static branch is claimable, not a bare element
-		expect(html).toBe('<!--vsk--><p>SSR</p>');
+		expect(html).toBe('<!--vsk:t:p--><p>SSR</p>');
 	});
 	it('renders empty block for empty list', () => {
 		const html = render(`
@@ -1393,35 +1393,37 @@ describe('IR Generation', () => {
 // ============================================================
 describe('Sub-Component Static Extraction', () => {
 
-	it('static subtree omits <!--vsk--> in hydrate mode', () => {
+	it('static subtree omits markers in hydrate mode', () => {
 		const html = render(`component App { return <div><span>Static</span></div>; }`, 'App', {}, new Map(), { hydrate: true });
-		// <div> contains a fully static <span> → no <!--vsk--> on either
+		// <div> contains a fully static <span> → no markers of either form
 		expect(html).not.toContain('<!--vsk-->');
+		expect(html).not.toContain('<!--vsk:');
 	});
 
-	it('dynamic element gets <!--vsk-->', () => {
+	it('dynamic element gets a typed marker', () => {
 		const html = render(`component App(props: { n: number }) { return <div>{props.n}</div>; }`, 'App', { n: 42 }, new Map(), { hydrate: true });
-		expect(html).toContain('<!--vsk-->');
+		expect(html).toContain('<!--vsk:t:div--><div>42</div>');
 	});
 
 	it('static child inside dynamic container lacks <!--vsk--> markers', () => {
 		const html = render(`component App(props: { n: number }) { return <div class="outer"><span>Static</span><p>{props.n}</p></div>; }`, 'App', { n: 7 }, new Map(), { hydrate: true });
-		expect(html.match(/<!--vsk-->/g)).toHaveLength(2);
+		expect(html.match(/<!--vsk:t:/g)).toHaveLength(2);
 		// The <span> should NOT have <!--vsk--> (fully static subtree)
 		// The <p> with DynamicBinding should have <!--vsk-->
 		expect(html).toContain('<span>Static</span>');
-		expect(html).toContain('<!--vsk--><p>7</p>');
+		expect(html).toContain('<!--vsk:t:p--><p>7</p>');
 	});
 
-	it('non-hydrate mode never has <!--vsk--> markers', () => {
+	it('non-hydrate mode never has markers', () => {
 		const html = render(`component App(props: { n: number }) { return <div>{props.n}</div>; }`, 'App', { n: 1 }, new Map(), { hydrate: false });
 		expect(html).not.toContain('<!--vsk-->');
+		expect(html).not.toContain('<!--vsk:');
 	});
 
 	it('deeply nested static subtree gets no markers', () => {
 		const html = render(`component App(props: { n: number }) { return <div><article><section><p>Deep</p></section></article><span>{props.n}</span></div>; }`, 'App', { n: 3 }, new Map(), { hydrate: true });
 		// Only the dynamic <span> and its dynamic ancestors get markers
-		expect(html).toContain('<!--vsk--><span>3</span>');
+		expect(html).toContain('<!--vsk:t:span--><span>3</span>');
 		// The static <article>/<section>/<p> chain has NO markers
 		expect(html).toContain('<article><section><p>Deep</p></section></article>');
 	});
@@ -1438,12 +1440,12 @@ describe('Hydrate component-call wrapper', () => {
 			component Nav { return <header class="sticky top-0">Hi</header>; }
 			component App { return <Nav />; }
 		`, 'App', {}, new Map(), { hydrate: true });
-		// The component call-site renders exactly `<!--vsk-->` + the callee's
-		// own root. No `<span style="display:contents">` box may sit between
+		// The component call-site renders exactly `<!--vsk:c:Nav-->` + the
+		// callee's own root. No `<span style="display:contents">` box may sit between
 		// marker and root: the hydration walker's claim reads the root directly
 		// off the marker, and a box in between tag-mismatches the claim
 		// (nextElement('div') hitting a span), freezing the walker cursor.
-		expect(html).toBe('<!--vsk--><header class="sticky top-0">Hi</header>');
+		expect(html).toBe('<!--vsk:c:Nav--><header class="sticky top-0">Hi</header>');
 	});
 
 	it('statement mode: bare JSX child gets the same marker-only boundary', () => {
@@ -1451,7 +1453,7 @@ describe('Hydrate component-call wrapper', () => {
 			component Nav { <header class="sticky top-0">Hi</header> }
 			component App { <Nav /> }
 		`, 'App', {}, new Map(), { hydrate: true });
-		expect(html).toBe('<!--vsk--><header class="sticky top-0">Hi</header>');
+		expect(html).toBe('<!--vsk:c:Nav--><header class="sticky top-0">Hi</header>');
 	});
 
 	it('fragment roots share one call-site marker, no shared container', () => {
@@ -1461,7 +1463,7 @@ describe('Hydrate component-call wrapper', () => {
 		`, 'App', {}, new Map(), { hydrate: true });
 		// Marker-only boundary: multiple statement-mode roots still claim
 		// directly off the shared walker; no layout wrapper is introduced.
-		expect(html).toBe('<!--vsk--><header>Top</header><nav>Nav</nav>');
+		expect(html).toBe('<!--vsk:c:Split--><header>Top</header><nav>Nav</nav>');
 	});
 
 	it('component inside a <p> keeps its marker inside the paragraph', () => {
@@ -1475,10 +1477,10 @@ describe('Hydrate component-call wrapper', () => {
 				</p>
 			}
 		`, 'App', {}, new Map(), { hydrate: true });
-		// The marker-only boundary is `<!--vsk--><a …>docs</a>` — the marker
+		// The marker-only boundary is `<!--vsk:c:Linkish--><a …>docs</a>` — the marker
 		// precedes phrasing content (`<a>`), which never triggers an implicit
 		// `<p>` close, so SSR-body parsing keeps the marker in the paragraph.
-		expect(html).toBe('<!--vsk--><p class="eyebrow mb-4 flex items-center gap-2"><!--vsk--><a href="/docs" class="hover:text-foreground no-underline text-muted-foreground">docs</a><span aria-hidden>/</span><span>Language</span></p>');
+		expect(html).toBe('<!--vsk:t:p--><p class="eyebrow mb-4 flex items-center gap-2"><!--vsk:c:Linkish--><a href="/docs" class="hover:text-foreground no-underline text-muted-foreground">docs</a><span aria-hidden>/</span><span>Language</span></p>');
 	});
 
 	it('non-hydrate mode emits no wrapper element', () => {
@@ -1488,6 +1490,33 @@ describe('Hydrate component-call wrapper', () => {
 		`, 'App', {}, new Map(), { hydrate: false });
 		expect(html).toBe('<header class="sticky top-0">Hi</header>');
 		expect(html).not.toContain('display:contents');
+	});
+
+	it('B1: component boundary carries the typed marker in expression mode', () => {
+		const html = render(`
+			component Card { return <section>Hi</section>; }
+			component App { return <div><Card /></div>; }
+		`, 'App', {}, new Map(), { hydrate: true });
+		expect(html).toContain('<!--vsk:c:Card--><section>Hi</section>');
+		expect(html).not.toContain('<!--vsk--><section>Hi</section>');
+	});
+
+	it('B1: component boundary carries the typed marker in statement mode', () => {
+		const html = render(`
+			component Card { <section>Hi</section> }
+			component App { <div><Card /></div> }
+		`, 'App', {}, new Map(), { hydrate: true });
+		expect(html).toContain('<!--vsk:c:Card--><section>Hi</section>');
+		expect(html).not.toContain('<!--vsk--><section>Hi</section>');
+	});
+
+	it('B1: static-subtree markers stay bare while component markers type', () => {
+		const html = render(`
+			component Card { return <section>Hi</section>; }
+			component App { return <div>{true ? <Card /> : null}</div>; }
+		`, 'App', {}, new Map(), { hydrate: true });
+		// Opaque-region static claims stay bare; the call-site is typed.
+		expect(html).toContain('<!--vsk:c:Card-->');
 	});
 
 });
@@ -1603,7 +1632,7 @@ describe('Compile-Cache (cached) Rendering + Hydrate Markers', () => {
 		const cached = hydratePrecompile(pageSrc);
 		const result = await renderPage(pageSrc, 'App', { name: 'W' }, new Map(), { hydrate: true, cached });
 		setVskHydrate(false);
-		expect(result.body).toBe('<!--vsk--><div>Hello, W!</div>');
+		expect(result.body).toBe('<!--vsk:t:div--><div>Hello, W!</div>');
 	});
 	it('renderPage with non-hydrate-precompiled cached omits markers (regression guard)', async () => {
 		const cached = plainPrecompile(pageSrc);
@@ -1623,7 +1652,7 @@ describe('Compile-Cache (cached) Rendering + Hydrate Markers', () => {
 		const cached = hydratePrecompile(pageSrc);
 		const html = await renderFullPage(pageSrc, 'App', { name: 'W' }, new Map(), { hydrate: true, cached });
 		setVskHydrate(false);
-		expect(html).toContain('<!--vsk-->');
+		expect(html).toContain('<!--vsk:t:div-->');
 		expect(html).toContain('Hello, W!');
 	});
 	it('renderPageStream with hydrate-precompiled cached emits markers', async () => {
@@ -1632,7 +1661,7 @@ describe('Compile-Cache (cached) Rendering + Hydrate Markers', () => {
 		let out = '';
 		for await (const chunk of stream) out += chunk;
 		setVskHydrate(false);
-		expect(out).toContain('<!--vsk-->');
+		expect(out).toContain('<!--vsk:t:div-->');
 		expect(out).toContain('<div>Hello, W!</div>');
 	});
 	it('renderPageStream honors clientScriptUrl like renderFullPage', async () => {
@@ -1848,6 +1877,34 @@ describe('Cross-File Scope Isolation', () => {
 });
 
 console.log(`\n${'='.repeat(50)}`);
+describe('Dynamic attribute undefined/false omission', () => {
+	it('omits attributes whose expression is undefined', () => {
+		expect(render('component App(props: { d?: boolean }) { return <button disabled={props.d}>x</button>; }', 'App', { d: undefined })).toBe('<button>x</button>');
+	});
+	it('omits attributes whose expression is false', () => {
+		expect(render('component App(props: { d?: boolean }) { return <button disabled={props.d}>x</button>; }', 'App', { d: false })).toBe('<button>x</button>');
+	});
+	it('emits attribute with its value when true', () => {
+		expect(render('component App(props: { d?: boolean }) { return <button disabled={props.d}>x</button>; }', 'App', { d: true })).toBe('<button disabled="true">x</button>');
+	});
+	it('emits attribute with its string value', () => {
+		expect(render('component App(props: { a?: string }) { return <div aria-expanded={props.a}>x</div>; }', 'App', { a: 'true' })).toBe('<div aria-expanded="true">x</div>');
+	});
+	it('omits nullish class bindings', () => {
+		expect(render('component App(props: { c?: string }) { return <div class={props.c}>x</div>; }', 'App', {})).toBe('<div>x</div>');
+	});
+	it('keeps static attributes when a dynamic sibling is omitted', () => {
+		expect(render('component App(props: { d?: boolean }) { return <button class="btn" disabled={props.d}>x</button>; }', 'App', {})).toBe('<button class="btn">x</button>');
+	});
+	it('omits undefined bindings on self-closing tags', () => {
+		expect(render('component App(props: { d?: boolean }) { return <input disabled={props.d} />; }', 'App', {})).toBe('<input />');
+	});
+	it('avoids recreating static output when all dynamic attrs are omitted', () => {
+		const html = render('component App(props: { d?: boolean }) { return <button class="btn" disabled={props.d}>x</button>; }', 'App', { d: false });
+		expect(html).toBe('<button class="btn">x</button>');
+		expect(html.indexOf('undefined')).toBe(-1);
+	});
+});
 asyncChain.then(() => {
 	console.log(`Results: ${passed} passed, ${failed} failed, ${passed + failed} total`);
 	if (failed > 0) process.exit(1);

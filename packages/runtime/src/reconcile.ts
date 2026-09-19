@@ -1,12 +1,13 @@
 import { destroy_block } from '@vesk/runtime/src/ripple-blocks';
 import type { Block } from '@vesk/runtime/src/ripple-runtime';
+import type { ClaimByKeyOptions } from '@vesk/runtime/src/hydrate';
 
 interface MapEntry {
 	marker: Comment;
 	effs: Block[];
 }
 
-export type KeyedClaimFn = (key: string) => { el: Element } | null;
+export type KeyedClaimFn = (key: string, options?: ClaimByKeyOptions) => { el: Element } | null;
 export type KeyedPeekFn = (key: string) => Element | null;
 
 export interface KeyedHydrateWalker {
@@ -18,7 +19,7 @@ export function reconcile<T>(
 	anchor: Node,
 	endAnchor: Node,
 	items: T[],
-	keyFn: (item: T) => string,
+	keyFn: (item: T, index: number) => string,
 	createItem: (item: T, index: number, effs: Block[], root: Element | null) => void,
 	claim?: KeyedClaimFn,
 ): (newItems: T[]) => void {
@@ -27,7 +28,7 @@ export function reconcile<T>(
 
 	for (let i = 0; i < items.length; i++) {
 		const item = items[i];
-		const key = keyFn(item);
+		const key = keyFn(item, i);
 		const marker = document.createComment('k:' + key);
 		const effs: Block[] = [];
 		// When hydrated, the item's SSR root element (if any) is claimed here;
@@ -79,44 +80,52 @@ export function reconcile<T>(
  * containing element, then hands off to `reconcile` with the walker's
  * `claimByKey` as the claim function. Items that never had SSR markers (the
  * list was empty or the client data grew) anchor at the end of the region and
- * render fresh. Ordering is exact when SSR data matches the client data;
- * divergence degrades to appending fresh items at the region tail instead of
- * duplicating already-claimed SSR content.
+ * render fresh. SSR↔client reorder adopts each item by key and moves it into
+ * client order (node identity preserved — no content swapping, no twins);
+ * only genuinely missing keys render fresh. RULE: NO DUPLICATION.
  */
 export function reconcileHydrated<T>(
 	anchor: Node,
 	endAnchor: Node,
 	items: T[],
-	keyFn: (item: T) => string,
+	keyFn: (item: T, index: number) => string,
 	createItem: (item: T, index: number, effs: Block[], root: Element | null) => void,
 	walker: KeyedHydrateWalker,
 	parent: Node,
 ): (newItems: T[]) => void {
-	// Discover the region's SSR bounds without consuming any markers.
-	const claimedEls: Element[] = [];
+	// Phase 1: adopt every item by key up front. Relocate moves out-of-order
+	// nodes to the cursor, so afterwards adopted elements stand contiguous in
+	// client order with node identity preserved. Anchors must be placed AFTER
+	// this (phase 2): placing them first would strand moved nodes outside the
+	// region and corrupt every later range operation.
+	const claimed = new Map<string, Element>();
 	for (let i = 0; i < items.length; i++) {
-		const el = walker.peekKey ? walker.peekKey(keyFn(items[i])) : null;
-		if (el) claimedEls.push(el);
+		const key = keyFn(items[i], i);
+		if (claimed.has(key)) continue;
+		const c = walker.claimByKey ? walker.claimByKey(key, { relocate: true }) : null;
+		if (c) claimed.set(key, c.el);
 	}
 
-	if (claimedEls.length > 0) {
-		const order = new Map<ChildNode, number>();
-		const kids = parent.childNodes;
-		for (let i = 0; i < kids.length; i++) order.set(kids[i], i);
-		let first = claimedEls[0];
-		let last = claimedEls[0];
-		for (const el of claimedEls) {
-			if ((order.get(el) ?? -1) < (order.get(first) ?? -1)) first = el;
-			if ((order.get(el) ?? -1) > (order.get(last) ?? -1)) last = el;
-		}
-		parent.insertBefore(anchor, first);
+	// Phase 2: anchors around the adopted span, in client order.
+	const orderedEls: Element[] = [];
+	for (let i = 0; i < items.length; i++) {
+		const el = claimed.get(keyFn(items[i], i));
+		if (el && !orderedEls.includes(el)) orderedEls.push(el);
+	}
+
+	if (orderedEls.length > 0) {
+		parent.insertBefore(anchor, orderedEls[0]);
+		const last = orderedEls[orderedEls.length - 1];
 		parent.insertBefore(endAnchor, last.nextSibling);
 	} else {
 		parent.appendChild(anchor);
 		parent.appendChild(endAnchor);
 	}
 
-	return reconcile(anchor, endAnchor, items, keyFn, createItem, (key: string) => walker.claimByKey!(key));
+	return reconcile(anchor, endAnchor, items, keyFn, createItem, (key: string) => {
+		const el = claimed.get(key);
+		return el ? { el } : null;
+	});
 }
 
 function removeRange(start: Node, end: Node): void {

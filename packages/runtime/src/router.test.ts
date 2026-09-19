@@ -335,7 +335,7 @@ test('Link SSR emits a claim marker before the anchor', () => {
 	try {
 		delete globalThis.document;
 		const out = Link({ href: '/docs/x', class: 'nav', children: '<span>go</span>' });
-		expect(out).toBe('<!--vsk--><a href="/docs/x" class="nav"><span>go</span></a>');
+		expect(out).toBe('<!--vsk:c:Link--><a href="/docs/x" class="nav"><span>go</span></a>');
 	} finally {
 		globalThis.document = saved;
 	}
@@ -394,11 +394,11 @@ test('NavLink hydrate adopts SSR anchor without duplicating children', () => {
 });
 
 test('NavLink hydrate consumes its walker claim marker (no leftover markers)', () => {
-	// SSR shape for a nav loop item: <span> <!--vsk--> <a>Home</a> </span>.
+	// SSR shape for a nav loop item: <span> <!--vsk:c:Link--> <a>Home</a> </span>.
 	// The layout passes the item's subWalker to NavLink; the claim must
-	// consume (remove) the inner `<!--vsk-->` marker or it stays unclaimed.
+	// consume (remove) the inner typed marker or it stays unclaimed.
 	const span = document.createElement('span');
-	const marker = document.createComment('vsk');
+	const marker = document.createComment('vsk:c:Link');
 	const a = document.createElement('a');
 	span.appendChild(marker);
 	span.appendChild(a);
@@ -881,7 +881,7 @@ test('Link SSR does not emit the scrollBehavior prop as an attribute', () => {
 	try {
 		delete globalThis.document;
 		const out = Link({ href: '/docs/x', scrollBehavior: 'smooth', children: 'go' });
-		expect(out).toBe('<!--vsk--><a href="/docs/x">go</a>');
+		expect(out).toBe('<!--vsk:c:Link--><a href="/docs/x">go</a>');
 	} finally {
 		globalThis.document = saved;
 	}

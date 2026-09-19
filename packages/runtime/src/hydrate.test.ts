@@ -1,4 +1,4 @@
-import { needsHydration, hydrationCount, createHydrateWalker, createHydrateChildWalker, hydrateOnInteraction, hydrate, assertFullyHydrated, setHydrateDevMode } from '@vesk/runtime/src/hydrate';
+import { needsHydration, hydrationCount, createHydrateWalker, createHydrateChildWalker, hydrateOnInteraction, hydrateIdle, hydrate, assertFullyHydrated, auditHydration, setHydrateDevMode, setHydrateStrict, onHydrationMismatch, bumpNavEpoch, isVskMarkerText, parseVskMarker } from '@vesk/runtime/src/hydrate';
 import { reconcileHydrated } from '@vesk/runtime/src/reconcile';
 import { effect } from '@vesk/runtime/src/ripple-blocks';
 import { flush_sync, get, set, track } from '@vesk/runtime/src/ripple-runtime';
@@ -941,16 +941,15 @@ describe('reconcileHydrated claim-by-key adoption', () => {
 			ul,
 		);
 
-		// Client order differs from SSR order. Strict claim-by-key cannot adopt
-		// out of order, so each item claims its run position via the walker's
-		// positional claim. The result must match the client order with the SAME
-		// two SSR nodes (no duplicated/duplicate elements, none left to reorder).
+		// Client order differs from SSR order. Relocate adopts each item by
+		// key and moves it into client order with node identity preserved —
+		// no content swapping, no fresh twins, no ghosts.
 		const elems = ul.childNodes.filter((c) => c.nodeType === 1);
 		expect(elems.length).toBe(2);
-		expect(elems[0]).toBe(li1);
-		expect(elems[1]).toBe(li2);
-		expect(li1.textContent).toBe('B2');
-		expect(li2.textContent).toBe('A2');
+		expect(elems[0]).toBe(li2);
+		expect(elems[1]).toBe(li1);
+		expect(li2.textContent).toBe('B2');
+		expect(li1.textContent).toBe('A2');
 		expect(li1.hasAttribute('data-vsk-claimed')).toBe(true);
 		expect(li2.hasAttribute('data-vsk-claimed')).toBe(true);
 		// Every SSR marker was consumed — the canary stays silent.
@@ -1005,6 +1004,267 @@ describe('reconcileHydrated claim-by-key adoption', () => {
 	});
 });
 
+describe('A4: keyed relocate adopts out of order and moves into place', () => {
+  it('claimByKey relocate moves a later item to the cursor, cursor still claims the rest', () => {
+    mockDocument();
+    const ul = document.createElement('ul');
+    const m1 = document.createComment('vsk');
+    const li1 = makeNode(1, 'li'); li1.setAttribute('data-vsk-key', '1'); li1.appendChild(document.createTextNode('A'));
+    const m2 = document.createComment('vsk');
+    const li2 = makeNode(1, 'li'); li2.setAttribute('data-vsk-key', '2'); li2.appendChild(document.createTextNode('B'));
+    ul.appendChild(m1); ul.appendChild(li1);
+    ul.appendChild(m2); ul.appendChild(li2);
+    const walker = createHydrateWalker(ul, [m1, m2]);
+
+    const moved = walker.claimByKey('2', { relocate: true });
+    expect(moved.el).toBe(li2);
+    // li2 now stands at the cursor (before m1's marker); li1 untouched.
+    expect(ul.childNodes.indexOf(li2)).toBeLessThan(ul.childNodes.indexOf(m1));
+    const mine = walker.claimByKey('1', { relocate: true });
+    expect(mine.el).toBe(li1);
+    expect(li1.getAttribute('data-vsk-claimed')).toBe('');
+    expect(li2.getAttribute('data-vsk-claimed')).toBe('');
+    expect(assertFullyHydrated(ul)).toBe(true);
+    cleanupDocument();
+  });
+
+  it('relocate with a genuinely missing key returns null without moving anything', () => {
+    mockDocument();
+    const ul = document.createElement('ul');
+    const m1 = document.createComment('vsk');
+    const li1 = makeNode(1, 'li'); li1.setAttribute('data-vsk-key', '1');
+    ul.appendChild(m1); ul.appendChild(li1);
+    const before = ul.childNodes.slice();
+    const walker = createHydrateWalker(ul, [m1]);
+    expect(walker.claimByKey('9', { relocate: true })).toBe(null);
+    expect(ul.childNodes.length).toBe(before.length);
+    for (let i = 0; i < before.length; i++) expect(ul.childNodes[i]).toBe(before[i]);
+    cleanupDocument();
+  });
+
+  it('three-item reverse adopts all three in client order with zero fresh nodes', () => {
+    mockDocument();
+    const ul = document.createElement('ul');
+    const lis = [];
+    const ms = [];
+    for (let k = 1; k <= 3; k++) {
+      const m = document.createComment('vsk');
+      const li = makeNode(1, 'li');
+      li.setAttribute('data-vsk-key', String(k));
+      li.appendChild(document.createTextNode('n' + k));
+      ul.appendChild(m); ul.appendChild(li);
+      ms.push(m); lis.push(li);
+    }
+    const walker = createHydrateWalker(ul, ms);
+    const anchor = document.createComment('map');
+    const endAnchor = document.createComment('map-end');
+    const seen = [];
+    const createItem = (item, _i, effs, root) => {
+      effs.push(new BlockMock());
+      const li = root || walker.nextElement('li');
+      seen.push(li);
+    };
+    reconcileHydrated(
+      anchor, endAnchor,
+      [{ id: 3 }, { id: 2 }, { id: 1 }],
+      (item) => String(item.id),
+      createItem,
+      walker,
+      ul,
+    );
+    expect(seen.length).toBe(3);
+    expect(seen[0]).toBe(lis[2]);
+    expect(seen[1]).toBe(lis[1]);
+    expect(seen[2]).toBe(lis[0]);
+    const elems = ul.childNodes.filter((c) => c.nodeType === 1);
+    expect(elems.length).toBe(3);
+    expect(elems[0]).toBe(lis[2]);
+    expect(elems[1]).toBe(lis[1]);
+    expect(elems[2]).toBe(lis[0]);
+    expect(assertFullyHydrated(ul)).toBe(true);
+    cleanupDocument();
+  });
+});
+
+describe('A5: SSR text stashed for snapshot init', () => {
+  it('claim stashes concatenated direct text and still strips it', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const m = document.createComment('vsk');
+    const h1 = document.createElement('h1');
+    h1.appendChild(document.createTextNode('Hel'));
+    h1.appendChild(document.createTextNode('lo'));
+    root.appendChild(m); root.appendChild(h1);
+    const walker = createHydrateWalker(root, [m]);
+    const el = walker.nextElement('h1');
+    expect(el).toBe(h1);
+    expect(h1.__vsk_ssrText).toBe('Hello');
+    expect(h1.childNodes.length).toBe(0);
+    cleanupDocument();
+  });
+
+  it('elements without direct text stash an empty snapshot', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const m = document.createComment('vsk');
+    const h1 = document.createElement('h1');
+    const inner = document.createElement('span');
+    h1.appendChild(inner);
+    root.appendChild(m); root.appendChild(h1);
+    const walker = createHydrateWalker(root, [m]);
+    walker.nextElement('h1');
+    expect(h1.__vsk_ssrText).toBe('');
+    expect(h1.childNodes.length).toBe(1);
+    cleanupDocument();
+  });
+});
+
+describe('B1: typed marker identity pinpoints divergence', () => {
+  it('isVskMarkerText accepts bare and typed markers only', () => {
+    expect(isVskMarkerText('vsk')).toBe(true);
+    expect(isVskMarkerText('vsk:c:StoreItem')).toBe(true);
+    expect(isVskMarkerText('vsk:t:div')).toBe(true);
+    expect(isVskMarkerText('vsk:')).toBe(true);
+    expect(isVskMarkerText('vesk-ssr-error')).toBe(false);
+    expect(isVskMarkerText('vsk-hold')).toBe(false);
+    expect(isVskMarkerText('')).toBe(false);
+    expect(isVskMarkerText(null)).toBe(false);
+    expect(isVskMarkerText(undefined)).toBe(false);
+  });
+
+  it('parseVskMarker extracts identity or null', () => {
+    expect(parseVskMarker('vsk').identity).toBe(null);
+    expect(parseVskMarker('vsk:c:StoreItem').identity).toBe('c:StoreItem');
+    expect(parseVskMarker('nope')).toBe(null);
+  });
+
+  it('typed component markers are collected and adopted like bare ones', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const m = document.createComment('vsk:c:Helper');
+    const box = document.createElement('div');
+    root.appendChild(m); root.appendChild(box);
+    expect(needsHydration(root)).toBe(true);
+    expect(hydrationCount(root)).toBe(1);
+    const walker = createHydrateWalker(root);
+    expect(walker.nextElement('div')).toBe(box);
+    expect(box.getAttribute('data-vsk-claimed')).toBe('');
+    expect(assertFullyHydrated(root)).toBe(true);
+    cleanupDocument();
+  });
+
+  it('backoff names the skipped typed marker; audit names the orphan', () => {
+    mockDocument();
+    const seen = [];
+    onHydrationMismatch((issue) => seen.push(issue));
+    const root = document.createElement('div');
+    const m = document.createComment('vsk:c:StoreItem');
+    const h1 = document.createElement('h1');
+    root.appendChild(m); root.appendChild(h1);
+    const walker = createHydrateWalker(root);
+    captureWarns(() => { walker.nextElement('span'); });
+    expect(seen.some((i) => i.detail.includes('vsk:c:StoreItem'))).toBe(true);
+    const report = auditHydration(root);
+    expect(report.ok).toBe(false);
+    expect(report.issues.some((i) => i.detail.includes('vsk:c:StoreItem'))).toBe(true);
+    onHydrationMismatch(null);
+    cleanupDocument();
+  });
+});
+
+describe('B3: subWalker transfers ownership (no shared refs, no cursor drift)', () => {
+  it('split splices owned markers out; parent and child claim independently', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const mOut = document.createComment('vsk');
+    const outEl = document.createElement('p');
+    const section = document.createElement('section');
+    const mIn = document.createComment('vsk');
+    const inEl = document.createElement('span');
+    section.appendChild(mIn); section.appendChild(inEl);
+    root.appendChild(mOut); root.appendChild(outEl); root.appendChild(section);
+    const walker = createHydrateWalker(root);
+    const sub = walker.subWalker(section);
+    // Child owns exactly the interior marker.
+    expect(sub.done()).toBe(false);
+    expect(sub.nextElement('span')).toBe(inEl);
+    expect(sub.done()).toBe(true);
+    // Parent still owns the outer marker and claims it after the split.
+    expect(walker.done()).toBe(false);
+    expect(walker.nextElement('p')).toBe(outEl);
+    expect(walker.done()).toBe(true);
+    expect(assertFullyHydrated(root)).toBe(true);
+    cleanupDocument();
+  });
+
+  it('consuming in the child never disturbs the parent cursor', () => {
+    mockDocument();
+    const root = document.createElement('div');
+    const m1 = document.createComment('vsk');
+    const e1 = document.createElement('div');
+    const section = document.createElement('section');
+    const m2 = document.createComment('vsk');
+    const e2 = document.createElement('em');
+    section.appendChild(m2); section.appendChild(e2);
+    root.appendChild(m1); root.appendChild(e1); root.appendChild(section);
+    const walker = createHydrateWalker(root);
+    expect(walker.nextElement('div')).toBe(e1);
+    const sub = walker.subWalker(section);
+    expect(sub.nextElement('em')).toBe(e2);
+    expect(walker.done()).toBe(true);
+    expect(assertFullyHydrated(root)).toBe(true);
+    cleanupDocument();
+  });
+});
+
+describe('keyed markers: skew and untyped adoption are reported, never silent', () => {
+  it('t:tag marker preceding a different tag reports marker-skew and still adopts', () => {
+    mockDocument();
+    const seen = [];
+    onHydrationMismatch((issue) => seen.push(issue));
+    const root = document.createElement('div');
+    const m = document.createComment('vsk:t:div');
+    const span = document.createElement('span');
+    root.appendChild(m); root.appendChild(span);
+    const walker = createHydrateWalker(root);
+    const warns = captureWarns(() => {
+      expect(walker.nextElement('span')).toBe(span);
+    });
+    expect(seen.some((i) => i.kind === 'marker-skew' && i.detail.includes('vsk:t:div'))).toBe(true);
+    expect(warns.some((w) => w.includes('marker-skew'))).toBe(true);
+    onHydrationMismatch(null);
+    cleanupDocument();
+  });
+
+  it('bare marker adoption reports untyped-marker', () => {
+    mockDocument();
+    const seen = [];
+    onHydrationMismatch((issue) => seen.push(issue));
+    const root = document.createElement('div');
+    const m = document.createComment('vsk');
+    const div = document.createElement('div');
+    root.appendChild(m); root.appendChild(div);
+    const walker = createHydrateWalker(root);
+    captureWarns(() => {
+      expect(walker.nextElement('div')).toBe(div);
+    });
+    expect(seen.some((i) => i.kind === 'untyped-marker')).toBe(true);
+    onHydrationMismatch(null);
+    cleanupDocument();
+  });
+
+  it('audit flags bare leftover markers as untyped', () => {
+    mockDocument();
+    const container = document.createElement('div');
+    container.appendChild(document.createComment('vsk'));
+    container.appendChild(document.createElement('section'));
+    const report = auditHydration(container);
+    expect(report.ok).toBe(false);
+    expect(report.issues.some((i) => i.detail.includes('untyped'))).toBe(true);
+    cleanupDocument();
+  });
+});
+
 describe('hydration-integrity canary', () => {
 	it('assertFullyHydrated returns true when every marker was claimed', () => {
 		mockDocument();
@@ -1055,6 +1315,279 @@ describe('hydration-integrity canary', () => {
 		setHydrateDevMode(true);
 		cleanupDocument();
 	});
+});
+
+describe('A1: mismatch telemetry + strict audit (NO DUPLICATION, NO MISMATCH)', () => {
+  it('tag-mismatch miss notifies the hook once and keeps the single dev warn', () => {
+    mockDocument();
+    const seen = [];
+    onHydrationMismatch((issue) => seen.push(issue));
+    const root = document.createElement('div');
+    const m1 = document.createComment('vsk');
+    const s1 = document.createElement('div');
+    root.appendChild(m1); root.appendChild(s1);
+    const walker = createHydrateWalker(root);
+    const warns = captureWarns(() => {
+      const el = walker.nextElement('span');
+      expect(el.tagName).toBe('SPAN');
+    });
+    expect(warns.length).toBe(1);
+    expect(warns[0]).toContain('claim missed');
+    // Two telemetry events: the silent backoff (names the skipped marker)
+    // plus the fallback that built the fresh node.
+    expect(seen.length).toBe(2);
+    expect(seen[0].kind).toBe('tag-mismatch');
+    expect(seen[1].kind).toBe('tag-mismatch');
+    onHydrationMismatch(null);
+    cleanupDocument();
+  });
+
+  it('exhausted fallback notifies the hook as exhausted and stays console-silent', () => {
+    mockDocument();
+    const seen = [];
+    onHydrationMismatch((issue) => seen.push(issue));
+    const walker = createHydrateWalker(null, []);
+    const warns = captureWarns(() => {
+      const el = walker.nextElement('div');
+      expect(el.tagName).toBe('DIV');
+    });
+    expect(warns.length).toBe(0);
+    expect(seen.length).toBe(1);
+    expect(seen[0].kind).toBe('exhausted');
+    onHydrationMismatch(null);
+    cleanupDocument();
+  });
+
+  it('auditHydration returns a structured report for orphans', () => {
+    mockDocument();
+    const container = document.createElement('div');
+    const m = document.createComment('vsk');
+    const el = document.createElement('span');
+    el.appendChild(document.createTextNode('ghost'));
+    container.appendChild(m); container.appendChild(el);
+    const report = auditHydration(container);
+    expect(report.ok).toBe(false);
+    expect(report.unclaimed).toBe(1);
+    expect(report.twins).toBe(0);
+    expect(report.issues.some((i) => i.kind === 'leftover-marker')).toBe(true);
+    // Non-strict: report without touching the DOM.
+    expect(container.childNodes.length).toBe(2);
+    cleanupDocument();
+  });
+
+  it('strict audit removes genuine orphans; second audit is clean', () => {
+    mockDocument();
+    setHydrateStrict(true);
+    const container = document.createElement('div');
+    const m = document.createComment('vsk');
+    const el = document.createElement('span');
+    el.appendChild(document.createTextNode('ghost'));
+    container.appendChild(m); container.appendChild(el);
+    const first = auditHydration(container);
+    expect(first.ok).toBe(false);
+    expect(first.unclaimed).toBe(1);
+    expect(container.childNodes.length).toBe(0);
+    const second = auditHydration(container);
+    expect(second.ok).toBe(true);
+    expect(second.unclaimed).toBe(0);
+    setHydrateStrict(false);
+    cleanupDocument();
+  });
+
+  it('twin scan flags an adopted node beside an identical unadopted twin', () => {
+    mockDocument();
+    const container = document.createElement('div');
+    const adopted = document.createElement('div');
+    adopted.setAttribute('data-vsk-claimed', '');
+    adopted.appendChild(document.createTextNode('same'));
+    const twin = document.createElement('div');
+    twin.appendChild(document.createTextNode('same'));
+    container.appendChild(adopted); container.appendChild(twin);
+    const report = auditHydration(container);
+    expect(report.twins).toBe(1);
+    expect(report.issues.some((i) => i.kind === 'twin')).toBe(true);
+    expect(report.ok).toBe(false);
+    cleanupDocument();
+  });
+
+  it('twin scan ignores identical static siblings that are both unclaimed', () => {
+    mockDocument();
+    const container = document.createElement('div');
+    for (let i = 0; i < 2; i++) {
+      const s = document.createElement('div');
+      s.appendChild(document.createTextNode('same'));
+      container.appendChild(s);
+    }
+    const report = auditHydration(container);
+    expect(report.twins).toBe(0);
+    cleanupDocument();
+  });
+
+  it('key reorder (key present later) reports key-reorder; absent key stays silent', () => {
+    mockDocument();
+    const seen = [];
+    onHydrationMismatch((issue) => seen.push(issue));
+    const root = document.createElement('div');
+    const m1 = document.createComment('vsk');
+    const e1 = document.createElement('div');
+    e1.setAttribute('data-vsk-key', '2');
+    const m2 = document.createComment('vsk');
+    const e2 = document.createElement('div');
+    e2.setAttribute('data-vsk-key', '1');
+    root.appendChild(m1); root.appendChild(e1);
+    root.appendChild(m2); root.appendChild(e2);
+    const walker = createHydrateWalker(root);
+    expect(walker.claimByKey('1')).toBe(null);
+    expect(seen.length).toBe(1);
+    expect(seen[0].kind).toBe('key-reorder');
+    expect(walker.claimByKey('9')).toBe(null);
+    expect(seen.length).toBe(1);
+    onHydrationMismatch(null);
+    cleanupDocument();
+  });
+});
+
+describe('A3: deferred hydration never hydrates a dead page', () => {
+  function mockWindow() {
+    const timers = [];
+    globalThis.window = {
+      innerHeight: 800,
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    const realSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((fn) => { timers.push(fn); return timers.length; });
+    return {
+      timers,
+      drain() { while (timers.length > 0) timers.shift()(); },
+      restore() {
+        globalThis.setTimeout = realSetTimeout;
+        delete globalThis.window;
+      },
+    };
+  }
+
+  function connectedContainer() {
+    const container = document.createElement('div');
+    container.parentNode = { isConnected: true };
+    return container;
+  }
+
+  it('hydrateIdle skips every chunk when the container is detached', () => {
+    mockDocument();
+    const w = mockWindow();
+    try {
+      let runs = 0;
+      const container = document.createElement('div');
+      // Detached by construction: parentNode null → isConnected false.
+      const m = document.createComment('vsk');
+      const el = document.createElement('div');
+      container.appendChild(m); container.appendChild(el);
+      hydrateIdle(container, () => { runs++; }, {}, { chunkSize: 1, timeout: 1 });
+      w.drain();
+      expect(runs).toBe(0);
+    } finally {
+      w.restore();
+    }
+    cleanupDocument();
+  });
+
+  it('hydrateIdle runs once on idle; a navigation before fire cancels the run', () => {
+    mockDocument();
+    const w = mockWindow();
+    try {
+      let runs = 0;
+      const container = connectedContainer();
+      for (let i = 0; i < 3; i++) {
+        container.appendChild(document.createComment('vsk'));
+        container.appendChild(document.createElement('div'));
+      }
+      hydrateIdle(container, () => { runs++; }, {}, { timeout: 100000 });
+      bumpNavEpoch();
+      w.drain();
+      expect(runs).toBe(0);
+    } finally {
+      w.restore();
+    }
+    cleanupDocument();
+  });
+
+  it('B2: hydrateIdle runs exactly once no matter how many idle windows fire', () => {
+    mockDocument();
+    const w = mockWindow();
+    try {
+      let runs = 0;
+      const container = connectedContainer();
+      for (let i = 0; i < 5; i++) {
+        container.appendChild(document.createComment('vsk'));
+        container.appendChild(document.createElement('div'));
+      }
+      hydrateIdle(container, () => { runs++; }, {}, { timeout: 100000 });
+      w.drain();
+      w.drain();
+      expect(runs).toBe(1);
+    } finally {
+      w.restore();
+    }
+    cleanupDocument();
+  });
+
+  it('hydrateIdle cancel() prevents the pending run', () => {
+    mockDocument();
+    const w = mockWindow();
+    try {
+      let runs = 0;
+      const container = connectedContainer();
+      container.appendChild(document.createComment('vsk'));
+      const handle = hydrateIdle(container, () => { runs++; }, {}, { timeout: 100000 });
+      handle.cancel();
+      w.drain();
+      expect(runs).toBe(0);
+    } finally {
+      w.restore();
+    }
+    cleanupDocument();
+  });
+
+  it('hydrateOnInteraction trigger stands down after navigation', () => {
+    mockDocument();
+    let runs = 0;
+    const listeners = {};
+    const container = connectedContainer();
+    container.addEventListener = (ev, fn) => { listeners[ev] = fn; };
+    container.removeEventListener = (ev) => { delete listeners[ev]; };
+    container.appendChild(document.createComment('vsk'));
+    hydrateOnInteraction(container, () => { runs++; }, {});
+    bumpNavEpoch();
+    listeners.click({ type: 'click' });
+    expect(runs).toBe(0);
+    cleanupDocument();
+  });
+
+  it('custom isCurrent gate overrides the epoch compare', () => {
+    mockDocument();
+    const listeners = {};
+    const c2 = connectedContainer();
+    c2.addEventListener = (ev, fn) => { listeners[ev] = fn; };
+    c2.removeEventListener = (ev) => { delete listeners[ev]; };
+    c2.appendChild(document.createComment('vsk'));
+    let runs2 = 0;
+    hydrateOnInteraction(c2, () => { runs2++; }, {}, { isCurrent: () => true });
+    bumpNavEpoch();
+    listeners.click({ type: 'click' });
+    expect(runs2).toBe(1);
+
+    const listenersB = {};
+    const c3 = connectedContainer();
+    c3.addEventListener = (ev, fn) => { listenersB[ev] = fn; };
+    c3.removeEventListener = (ev) => { delete listenersB[ev]; };
+    c3.appendChild(document.createComment('vsk'));
+    let runs3 = 0;
+    hydrateOnInteraction(c3, () => { runs3++; }, {}, { isCurrent: () => false });
+    listenersB.click({ type: 'click' });
+    expect(runs3).toBe(0);
+    cleanupDocument();
+  });
 });
 
 console.log(`\nResults: ${passed} passed, ${failed} failed, ${passed + failed} total`);

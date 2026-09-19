@@ -6,8 +6,7 @@
  *
  * Run with: node --experimental-vm-modules packages/compiler/src/cli.test.js
  */
-import { readFileSync, mkdtempSync, writeFileSync, readdirSync } from 'fs';
-import { join } from 'path';
+import { readFileSync } from 'fs';
 import { compileClient } from '@vesk/compiler/src/client-codegen';
 import { parse } from '@vesk/compiler/src/parser';
 import { ssg } from '@vesk/compiler/src/server-codegen';
@@ -25,9 +24,22 @@ function describe(name, fn) {
 	}
 }
 
+const pendingAsyncIts = [];
 function it(name, fn) {
 	try {
-		fn();
+		const result = fn();
+		// Async tests must actually be awaited: an un-awaited async `it`
+		// passes vacuously (its assertions run after Results print as
+		// unobserved rejections). Collect and settle before reporting.
+		if (result && typeof result.then === 'function') {
+			pendingAsyncIts.push(
+				result.then(
+					() => { console.log(`  ✓ ${name}`); passed++; },
+					(e) => { console.log(`  ✗ ${name}`); console.log(`    ${e.message}`); failed++; },
+				),
+			);
+			return;
+		}
 		console.log(`  ✓ ${name}`);
 		passed++;
 	} catch (e) {
@@ -78,10 +90,22 @@ describe('SSG (Static Site Generation)', () => {
 		const result = await ssg(src);
 		expect(result.html).toContain('<!DOCTYPE html>');
 		expect(result.html).toContain('SSG Page');
-		expect(result.html).toContain('__VESK_DATA__');
-		expect(result.html).toContain('<!--vsk-->');
 		expect(result.html).toContain('<script>');
 		expect(result.body).toContain('SSG Page');
+		// Fully static: zero markers of either form (keyed-marker world).
+		expect(!result.html.includes('<!--vsk-->')).toBe(true);
+		expect(!result.html.includes('<!--vsk:')).toBe(true);
+	});
+
+	it('dynamic SSG page emits typed hydration markers', async () => {
+		const src = `import { track } from '@vesk/runtime';
+		export component Page {
+			const &[n] = track(1);
+			return <div>{n}</div>
+		}`;
+		const result = await ssg(src);
+		expect(result.body).toContain('<!--vsk:t:div--><div>1</div>');
+		expect(!result.body.includes('<!--vsk--><div>')).toBe(true);
 	});
 
 	it('getStaticProps sync provides props to render', async () => {
@@ -110,40 +134,12 @@ describe('SSG (Static Site Generation)', () => {
 		expect(data.n).toBe(42);
 	});
 
-	it('CLI --ssg writes HTML and JSON files', async () => {
-		const tmpDir = mkdtempSync('/tmp/vesk-ssg-test-');
-		const fixture = join(tmpDir, 'page.vsk');
-		writeFileSync(fixture, `export component Page {
-			return <main>CLI SSG</main>
-		}`);
-		const { execSync } = await import('child_process');
-		execSync(`node ${join(import.meta.url, '../../bin/vesk')} ${fixture} --ssg -o ${tmpDir}`, {
-			stdio: 'pipe',
-		});
-		const files = readdirSync(tmpDir);
-		expect(files).toContain('page.html');
-		expect(files).toContain('page.json');
-		const html = readFileSync(join(tmpDir, 'page.html'), 'utf-8');
-		expect(html).toContain('CLI SSG');
-		expect(html).toContain('__VESK_DATA__');
-	});
-
-	it('CLI --ssg writes to stdout without -o', async () => {
-		const tmpDir = mkdtempSync('/tmp/vesk-ssg-test-');
-		const fixture = join(tmpDir, 'page.vsk');
-		writeFileSync(fixture, `export component Page {
-			return <p>stdout</p>
-		}`);
-		const { execSync } = await import('child_process');
-		const out = execSync(`node ${join(import.meta.url, '../../bin/vesk')} ${fixture} --ssg`, {
-			encoding: 'utf-8',
-			stdio: 'pipe',
-		});
-		expect(out).toContain('<!DOCTYPE html>');
-		expect(out).toContain('stdout');
-		expect(out).toContain('__VESK_DATA__');
-		expect(out).toContain('<script>');
-	});
+	// NOTE: the `node ../../bin/vesk <file> --ssg` file-mode CLI these tests once
+	// invoked no longer exists (no bin/ in this package; SSG ships via
+	// `vesk build` + the adapter prerender path), and the old `join(url)`
+	// invocation never even formed a valid path — the async `it` harness never
+	// awaited them, so they passed vacuously. Removed; the `ssg()` API surface
+	// is covered above and in ssg.test.ts.
 });
 
 describe('.vsk file compilation', () => {
@@ -226,6 +222,7 @@ describe('.vsk file compilation', () => {
 	});
 });
 
+await Promise.all(pendingAsyncIts);
 console.log(`\n==================================================`);
 console.log(`Results: ${passed} passed, ${failed} failed, ${passed + failed} total`);
 console.log(`${failed === 0 ? 'All tests passed!' : 'Some tests failed!'}`);

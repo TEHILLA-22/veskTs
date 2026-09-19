@@ -315,8 +315,10 @@ export function Link(
 		// The marker makes the anchor claimable: hydrated call sites run
 		// `nextElement('a')` inside the component's boundary walker, and
 		// without a marker the claim lands on the next sibling's marker,
-		// eats it, and cascades into fresh-node fallback.
-		return `<!--vsk--><a ${attrs}>${childStr}</a>`;
+		// eats it, and cascades into fresh-node fallback. Keyed
+		// (`c:Link`) — no bare markers; the call-site marker carries the
+		// caller name while this one names the self-rendered anchor.
+		return `<!--vsk:c:Link--><a ${attrs}>${childStr}</a>`;
 	}
 	const a = document.createElement('a');
 	applyLinkDom(a, props, href);

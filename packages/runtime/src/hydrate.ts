@@ -27,6 +27,17 @@ export interface HydrateClaim {
 	el: Element;
 }
 
+export interface ClaimByKeyOptions {
+	/**
+	 * Adopt out of position: when the cursor's marker belongs to a different
+	 * item, scan the whole region for `key`, adopt it where it stands, and
+	 * move it to the cursor. Without this (default) only exact cursor-order
+	 * claims adopt; divergence renders fresh at the region tail while the SSR
+	 * twin rots.
+	 */
+	relocate?: boolean;
+}
+
 export interface HydrateWalker {
 	root: HTMLElement | null;
 	done(): boolean;
@@ -53,7 +64,7 @@ export interface HydrateWalker {
 	 * positionally. Returns `null` when no matching SSR marker remains (the item
 	 * is new client-side and is rendered fresh).
 	 */
-	claimByKey?(key: string): HydrateClaim | null;
+	claimByKey?(key: string, options?: ClaimByKeyOptions): HydrateClaim | null;
 	/**
 	 * Non-consuming variant of `claimByKey`, used to discover the DOM bounds of
 	 * a keyed list region before anchoring it.
@@ -114,10 +125,71 @@ export function setHydrateDevMode(enabled: boolean): void {
 	__hydrateDevMode = enabled;
 }
 
+// ---------------------------------------------------------------------------
+// Strict mode + mismatch telemetry (Hydrate-Todo A1).
+//
+// RULE: NO DUPLICATION, NO MISMATCH. Every claim miss funnels through
+// `reportMiss`, which notifies the registered telemetry handler and (in dev)
+// warns. Claim-time behavior never changes with strict mode: a tag-mismatch
+// backoff must leave the SSR element for its real owner (the /store/widget
+// lesson). Strict repair happens only at audit time, when every owner has had
+// its chance and leftovers are genuine orphans.
+// ---------------------------------------------------------------------------
+
+export type HydrationIssueKind =
+	| 'tag-mismatch'
+	| 'exhausted'
+	| 'leftover-marker'
+	| 'twin'
+	| 'key-reorder'
+	| 'marker-skew'
+	| 'untyped-marker';
+
+export interface HydrationIssue {
+	kind: HydrationIssueKind;
+	detail: string;
+}
+
+export interface HydrationReport {
+	ok: boolean;
+	unclaimed: number;
+	twins: number;
+	issues: HydrationIssue[];
+	sample: string;
+}
+
+export type HydrationMismatchHandler = (issue: HydrationIssue) => void;
+
+let __hydrateStrict = false;
+let __mismatchHandler: HydrationMismatchHandler | null = null;
+
+export function setHydrateStrict(enabled: boolean): void {
+	__hydrateStrict = enabled;
+}
+
+export function isHydrateStrict(): boolean {
+	return __hydrateStrict;
+}
+
+export function onHydrationMismatch(handler: HydrationMismatchHandler | null): void {
+	__mismatchHandler = handler;
+}
+
 function devWarn(message: string): void {
 	if (__hydrateDevMode && typeof console !== 'undefined') {
 		console.warn('[vesk-hydrate] ' + message);
 	}
+}
+
+function reportMiss(kind: HydrationIssueKind, detail: string, loud: boolean): void {
+	if (__mismatchHandler) {
+		try {
+			__mismatchHandler({ kind, detail });
+		} catch {
+			// Telemetry must never break rendering.
+		}
+	}
+	if (loud) devWarn(`${kind}: ${detail}`);
 }
 
 function stampClaimed(el: Element): void {
@@ -133,11 +205,25 @@ function stampClaimed(el: Element): void {
 
 // Strip the direct text children of a claimed element. Static text inside a
 // claimed subtree is re-created client-side as fresh text nodes, so the
-// SSR-serialized text nodes are dropped to avoid duplicates.
+// SSR-serialized text nodes are dropped to avoid duplicates. Before dropping,
+// stash the concatenated text as `__vsk_ssrText`: hydrate-mode codegen
+// initializes a sole dynamic text child from this snapshot, so a missed effect
+// degrades to stale (visible) text instead of an empty element (Hydrate-Todo
+// A5). Always set ('' when none) so consumers never branch on presence.
 function stripDirectTextNodes(el: Element): void {
+	let text = '';
 	for (let i = el.childNodes.length - 1; i >= 0; i--) {
-		if (el.childNodes[i].nodeType === 3) el.childNodes[i].remove();
+		const c = el.childNodes[i] as Element & { textContent?: unknown };
+		if ((c as unknown as { nodeType: number }).nodeType === 3) {
+			try {
+				text = String(c.textContent ?? '') + text;
+			} catch {
+				// ignore unreadable nodes, still remove below
+			}
+			(c as unknown as { remove(): void }).remove();
+		}
 	}
+	(el as unknown as { __vsk_ssrText?: string }).__vsk_ssrText = text;
 }
 
 // After a claim, a claimed element may still contain direct SSR element
@@ -151,6 +237,153 @@ function captureSsrElementChildren(el: Element): void {
 	(el as unknown as { __vsk_ssrEls?: Element[] }).__vsk_ssrEls = Array.prototype.slice.call(el.children);
 }
 
+function normText(el: Element): string {
+	try {
+		return ((el.textContent || '') as string).replace(/\s+/g, ' ').trim();
+	} catch {
+		return '';
+	}
+}
+
+function collectElements(rootEl: Element): Element[] {
+	const out: Element[] = [];
+	(function walk(n: Element): void {
+		const kids = n.childNodes;
+		for (let i = 0; i < kids.length; i++) {
+			const c = kids[i] as Element;
+			if ((c as unknown as { nodeType: number }).nodeType === 1) {
+				out.push(c);
+				walk(c);
+			}
+		}
+	})(rootEl);
+	return out;
+}
+
+/**
+ * Twin scan (heuristic): an adopted element sitting directly beside an
+ * unadopted same-tag element with identical non-empty text is the signature of
+ * a claim miss that twinned — the SSR node survived next to its fresh copy.
+ * Either order (SSR-then-fresh or fresh-then-SSR) counts. Purely static
+ * identical siblings (both unclaimed) are NOT twins; neither are two adopted
+ * nodes.
+ */
+function scanTwins(container: HTMLElement): { count: number; samples: string[] } {
+	let count = 0;
+	const samples: string[] = [];
+	for (const el of collectElements(container)) {
+		const prev = el.previousElementSibling;
+		if (!prev || prev.tagName !== el.tagName) continue;
+		const t = normText(el);
+		if (!t || t !== normText(prev)) continue;
+		let a = false;
+		let b = false;
+		try {
+			a = el.hasAttribute(CLAIMED_ATTR);
+			b = prev.hasAttribute(CLAIMED_ATTR);
+		} catch {
+			continue;
+		}
+		if (a !== b) {
+			count++;
+			if (samples.length < 3) {
+				try {
+					samples.push(`<${el.tagName.toLowerCase()}> "${t.slice(0, 60)}"`);
+				} catch {
+					// ignore sample failures
+				}
+			}
+		}
+	}
+	return { count, samples };
+}
+
+/**
+ * Structured audit of the most recent full hydration pass over `container`.
+ * Counts unclaimed `<!--vsk-->` markers (SSR regions the client never
+ * rendered) and twin elements (SSR node surviving beside its fresh copy).
+ * In strict mode, removes genuine orphans — marker plus its SSR element — now
+ * that every owner had its chance to claim. Claim-time backoff is untouched:
+ * mid-walk removal would steal elements from their real owners.
+ */
+export function auditHydration(container: HTMLElement): HydrationReport {
+	let unclaimed = 0;
+	let sample = '';
+	const orphans: Comment[] = [];
+	const orphanNames: string[] = [];
+	const walker = document.createTreeWalker(container, _SHOW_COMMENT, {
+		acceptNode: (node) => (isVskMarkerText(node.textContent) ? _FILTER_ACCEPT : _FILTER_SKIP),
+	});
+	while (walker.nextNode()) {
+		const c = walker.currentNode as Comment;
+		const el = c.nextElementSibling;
+		if (el && underClaimedAncestor(el, container)) continue;
+		unclaimed++;
+		orphans.push(c);
+		// B1: name the orphan — typed component identity from the marker, or
+		// the live element tag for bare markers.
+		if (orphanNames.length < 5) {
+			const parsed = parseVskMarker(c.textContent);
+			const id = parsed && parsed.identity ? `<!--vsk:${parsed.identity}-->` : null;
+			let tag = '';
+			try {
+				tag = el && el.tagName ? `<${el.tagName.toLowerCase()}>` : '(no element)';
+			} catch {
+				tag = '(unreadable)';
+			}
+			orphanNames.push(id ? `${id} before ${tag}` : `bare <!--vsk--> before ${tag} (untyped)`);
+		}
+		if (!sample && container.outerHTML) sample = String(container.outerHTML).slice(0, 800);
+	}
+	const twinRes = scanTwins(container);
+	const issues: HydrationIssue[] = [];
+	if (unclaimed > 0) {
+		issues.push({
+			kind: 'leftover-marker',
+			detail:
+				`${unclaimed} hydration marker${unclaimed === 1 ? '' : 's'} never claimed; ` +
+				`SSR and client markup diverge. Orphans: ${orphanNames.join(', ')}.`,
+		});
+	}
+	for (const s of twinRes.samples) {
+		issues.push({ kind: 'twin', detail: `possible hydration twin: ${s}` });
+	}
+	if (twinRes.count > twinRes.samples.length) {
+		issues.push({
+			kind: 'twin',
+			detail: `${twinRes.count - twinRes.samples.length} further possible twin(s) (samples capped)`,
+		});
+	}
+	if (__hydrateStrict) {
+		for (const c of orphans) {
+			try {
+				const el = c.nextElementSibling;
+				if (el && underClaimedAncestor(el, container)) continue;
+				if (el) el.remove();
+				c.remove();
+			} catch {
+				// Best-effort repair; the report above already recorded it.
+			}
+		}
+	}
+	if (__mismatchHandler) {
+		for (const issue of issues) {
+			try {
+				__mismatchHandler(issue);
+			} catch {
+				// Telemetry must never break rendering.
+			}
+		}
+	}
+	return {
+		ok: unclaimed === 0 && twinRes.count === 0,
+		unclaimed,
+		twins: twinRes.count,
+		issues,
+		sample,
+	};
+}
+
 /**
  * Dev-mode check that every `<!--vsk-->` marker in `container` has been
  * claimed by the most recent full hydration pass. Markers that remain belong
@@ -160,21 +393,13 @@ function captureSsrElementChildren(el: Element): void {
  * `hydrateInitial`, and every hydration strategy's completion.
  */
 export function assertFullyHydrated(container: HTMLElement): boolean {
-	let unclaimed = 0;
-	let sample = '';
-	const walker = document.createTreeWalker(container, _SHOW_COMMENT, {
-		acceptNode: (node) => (node.textContent === 'vsk' ? _FILTER_ACCEPT : _FILTER_SKIP),
-	});
-	while (walker.nextNode()) {
-		const el = (walker.currentNode as Comment).nextElementSibling;
-		if (el && underClaimedAncestor(el, container)) continue;
-		unclaimed++;
-		if (!sample && container.outerHTML) sample = String(container.outerHTML).slice(0, 800);
-	}
-	if (unclaimed > 0) {
+	const report = auditHydration(container);
+	if (!report.ok) {
 		devWarn(
-			`${unclaimed} hydration marker${unclaimed === 1 ? '' : 's'} never claimed; ` +
-				`SSR and client markup diverge. Container fragment:\n${sample}`
+			`${report.unclaimed} hydration marker${report.unclaimed === 1 ? '' : 's'} never claimed; ` +
+				`SSR and client markup diverge.` +
+				(report.twins > 0 ? ` ${report.twins} possible twin(s) detected.` : '') +
+				` Container fragment:\n${report.sample}`
 		);
 		return false;
 	}
@@ -196,9 +421,10 @@ function underClaimedAncestor(el: Element, container: HTMLElement): boolean {
 // the canary above only ever sees genuine phantoms). `claimByKey` also moves
 // the marker to `claimed` but does NOT advance the positional cursor: the
 // item's interior markers are claimed by the item's own render immediately
-// afterwards, and the cursor must still point at the item's region for that.
-// A `done()` walker whose markers were never all consumed is that same miss
-// surface — the canary reports it.
+// afterwards. `subWalker` TRANSFERS ownership (Hydrate-Todo B3): the child's
+// markers are spliced out of the parent walk, so exactly one engine owns each
+// marker and no cursor arithmetic can drift. A `done()` walker whose markers
+// were never all consumed is that same miss surface — the canary reports it.
 // ---------------------------------------------------------------------------
 
 type MarkerState = 'unclaimed' | 'claimed';
@@ -206,19 +432,87 @@ type MarkerState = 'unclaimed' | 'claimed';
 interface TrackedMarker {
 	comment: Comment;
 	state: MarkerState;
+	/** B1 identity from the marker text (`c:Name`), if the server typed it. */
+	identity: string | null;
+}
+
+function markerIdentity(comment: Comment): string | null {
+	try {
+		const parsed = parseVskMarker(comment.textContent);
+		return parsed ? parsed.identity : null;
+	} catch {
+		return null;
+	}
+}
+
+function describeMarker(tm: TrackedMarker): string {
+	return tm.identity ? `<!--vsk:${tm.identity}-->` : '<!--vsk-->';
 }
 
 const _SHOW_COMMENT = 128;
 export const _FILTER_ACCEPT = 1;
 export const _FILTER_SKIP = 2;
 
+// Keyed marker identity (Hydrate-Todo B1 + keyed markers). Server codegen
+// types every boundary: components (`<!--vsk:c:Name-->`), static subtrees
+// (`<!--vsk:t:tag-->`). No regex here either (runtime text-processing rule):
+// exact match or the `vsk:` prefix. Bare `<!--vsk-->` still adopts
+// positionally but is reported as `untyped-marker` — no exceptions.
+export function isVskMarkerText(text: string | null | undefined): boolean {
+	if (text === 'vsk') return true;
+	if (typeof text !== 'string' || text.length < 4) return false;
+	return text.charAt(0) === 'v' && text.charAt(1) === 's' && text.charAt(2) === 'k' && text.charAt(3) === ':';
+}
+
+export function parseVskMarker(text: string | null | undefined): { identity: string | null } | null {
+	if (text === 'vsk') return { identity: null };
+	if (!isVskMarkerText(text)) return null;
+	const rest = (text as string).slice(4);
+	return { identity: rest === '' ? null : rest };
+}
+
 export function collectVskMarkers(container: HTMLElement): Comment[] {
 	const markers: Comment[] = [];
 	const walker = document.createTreeWalker(container, _SHOW_COMMENT, {
-		acceptNode: (node) => (node.textContent === 'vsk' ? _FILTER_ACCEPT : _FILTER_SKIP),
+		acceptNode: (node) => (isVskMarkerText(node.textContent) ? _FILTER_ACCEPT : _FILTER_SKIP),
 	});
 	while (walker.nextNode()) markers.push(walker.currentNode as Comment);
 	return markers;
+}
+
+/**
+ * Keyed-marker verification at adopt time. A `t:tag` marker must precede that
+ * tag — anything else is SSR/HTML-parser skew (e.g. a `<p>` auto-close moving
+ * the marker), reported deterministically instead of drifting. A bare marker
+ * still adopts positionally but is reported: every emission site types its
+ * markers, so bare means a missed site or stale output. No exceptions.
+ */
+function checkMarkerIdentity(marker: Comment, el: Element): void {
+	let identity: string | null = null;
+	try {
+		const parsed = parseVskMarker(marker.textContent);
+		identity = parsed ? parsed.identity : null;
+	} catch {
+		identity = null;
+	}
+	if (identity === null) {
+		reportMiss(
+			'untyped-marker',
+			`adopted a bare <!--vsk--> marker before <${el.tagName.toLowerCase()}>; all emission sites must type their markers.`,
+			__hydrateDevMode
+		);
+		return;
+	}
+	if (identity.charAt(0) === 't' && identity.charAt(1) === ':') {
+		const expected = identity.slice(2).toLowerCase();
+		if (expected !== '' && expected !== el.tagName.toLowerCase()) {
+			reportMiss(
+				'marker-skew',
+				`marker <!--vsk:${identity}--> precedes <${el.tagName.toLowerCase()}> — SSR/HTML-parser skew; adopting the live element.`,
+				__hydrateDevMode
+			);
+		}
+	}
 }
 
 function adoptElement(marker: Comment, tag?: string): Element | null {
@@ -233,6 +527,7 @@ function adoptElement(marker: Comment, tag?: string): Element | null {
 	// later claim into fresh-node fallback (the empty `/store/widget` h1
 	// defect: the layout's missing conditional span claim stole the h1 marker).
 	if (tag && el.tagName.toLowerCase() !== tag) return null;
+	checkMarkerIdentity(marker, el);
 	marker.remove();
 	stripDirectTextNodes(el);
 	captureSsrElementChildren(el);
@@ -249,6 +544,7 @@ function adoptElementRaw(marker: Comment, tag?: string): Element | null {
 		return null;
 	}
 	if (tag && el.tagName.toLowerCase() !== tag) return null;
+	checkMarkerIdentity(marker, el);
 	marker.remove();
 	captureSsrElementChildren(el);
 	stampClaimed(el);
@@ -260,16 +556,16 @@ class WalkerEngine implements HydrateWalker {
 	private markers: TrackedMarker[];
 	private idx = 0;
 	// Elements already adopted by an earlier claim in this walk. Marker-only SSR
-	// can leave TWO `<!--vsk-->` marks on the same element (the call site and
-	// the callee's own root marker — e.g. Link self-prefixes `<!--vsk-->` and
-	// the shared walker claims its call-site marker), and a claim must never
+	// can leave TWO keyed marks on the same element (the call-site marker and
+	// the callee's own root marker — e.g. Link self-prefixes `<!--vsk:c:Link-->`
+	// and the shared walker claims its call-site marker), and a claim must never
 	// adopt the same node twice: double-adoption strips its SSR text a second
 	// time and shells the cursor so every later claim misses its element.
 	private adopted = new WeakSet<Element>();
 
 	constructor(root: HTMLElement | null, markers: Comment[]) {
 		this.root = root;
-		this.markers = markers.map((c) => ({ comment: c, state: 'unclaimed' as MarkerState }));
+		this.markers = markers.map((c) => ({ comment: c, state: 'unclaimed' as MarkerState, identity: markerIdentity(c) }));
 	}
 
 	done(): boolean {
@@ -295,7 +591,7 @@ class WalkerEngine implements HydrateWalker {
 		this.adopted.add(el);
 	}
 
-	// Marker-only SSR can stack several `<!--vsk-->` marks before ONE element
+	// Marker-only SSR can stack several keyed marks before ONE element
 	// (call-site marker + the callee's own root marker). The FIRST claim adopts
 	// the element; the alias markers that immediately follow it are dead — they
 	// point at an already-claimed node and must be physically retired so the
@@ -334,6 +630,12 @@ class WalkerEngine implements HydrateWalker {
 				// consuming it here would strip its SSR text, stamp a claim on
 				// a node this render does not own, and drift every later claim
 				// into fresh-node fallback (the empty `/store/widget` h1).
+				// The skipped marker's B1 identity names the divergence point.
+				reportMiss(
+					'tag-mismatch',
+					`claim wanted <${tag}> but the cursor holds ${describeMarker(tm)} before <${el.tagName.toLowerCase()}>; backing off for its real owner.`,
+					false
+				);
 				break;
 			}
 			this.idx++;
@@ -355,25 +657,36 @@ class WalkerEngine implements HydrateWalker {
 		}
 		// Every claim parked itself — either because the render asked for more
 		// elements than SSR provided, or because the SSR element tag did not
-		// match the claim. Best effort: build a fresh element and warn in dev.
+		// match the claim. Best effort: build a fresh element and report.
 		//
-		// The warning is scoped to walks that still hold unconsumed markers
+		// The report is scoped to walks that still hold unconsumed markers
 		// (`this.idx < this.markers.length`): that is the signature of a real
 		// SSR/client structural divergence — a marker is ahead of the cursor but
 		// the claim could not adopt it (wrong tag). Once the walker is exhausted
 		// every further `nextElement` is a post-hydration re-render (reactive
 		// loop/if blocks re-running after the interval or an event) legitimately
-		// building fresh nodes — silent, so a typing `for` loop does not spam the
-		// console every tick. SPA/client-only renders keep empty marker lists on
-		// temp roots and never warn.
-		if (__hydrateDevMode && this.root && this.idx < this.markers.length) {
-			devWarn(
-				`hydration claim missed <${tag || 'element'}> (${
-					this.markers.length - this.idx
-				} markers unconsumed); the client rendered more or different content than SSR.` +
-					(this.root.outerHTML ? ` Fragment:\n${String(this.root.outerHTML).slice(0, 800)}` : '')
-			);
+		// building fresh nodes — telemetry-only, so a typing `for` loop does
+		// not spam the console every tick. SPA/client-only renders keep empty
+		// marker lists on temp roots and never warn.
+		const hasUnconsumed = this.root !== null && this.idx < this.markers.length;
+		// Name the skipped cursor marker (B1): the divergence point is no
+		// longer anonymous.
+		let skipped = '';
+		if (hasUnconsumed) {
+			for (let s = this.idx; s < this.markers.length; s++) {
+				if (this.markers[s].state === 'claimed') continue;
+				skipped = ` skipped ${describeMarker(this.markers[s])}`;
+				break;
+			}
 		}
+		reportMiss(
+			hasUnconsumed ? 'tag-mismatch' : 'exhausted',
+			`hydration claim missed <${tag || 'element'}> (${
+				this.markers.length - this.idx
+			} markers unconsumed${skipped}); the client rendered more or different content than SSR.` +
+				(this.root && this.root.outerHTML ? ` Fragment:\n${String(this.root.outerHTML).slice(0, 800)}` : ''),
+			hasUnconsumed && __hydrateDevMode
+		);
 		return document.createElement(tag || 'div');
 	}
 
@@ -386,7 +699,14 @@ class WalkerEngine implements HydrateWalker {
 			}
 			const el = tm.comment.nextElementSibling as Element | null;
 			if (this.isAlreadyAdopted(tm, el)) continue;
-			if (tag && el && el.tagName.toLowerCase() !== tag) break;
+			if (tag && el && el.tagName.toLowerCase() !== tag) {
+				reportMiss(
+					'tag-mismatch',
+					`static claim wanted <${tag}> but the cursor holds ${describeMarker(tm)} before <${el.tagName.toLowerCase()}>; backing off for its real owner.`,
+					false
+				);
+				break;
+			}
 			this.idx++;
 			const adopted = adoptElementRaw(tm.comment, tag);
 			if (adopted === null) {
@@ -398,6 +718,16 @@ class WalkerEngine implements HydrateWalker {
 			tm.state = 'claimed';
 			return adopted;
 		}
+		// Static-stub fallback twins exactly like nextElement: the SSR node
+		// stays while a fresh node is built. Same reporting contract.
+		const hasUnconsumed = this.root !== null && this.idx < this.markers.length;
+		reportMiss(
+			hasUnconsumed ? 'tag-mismatch' : 'exhausted',
+			`hydration static claim missed <${tag || 'element'}> (${
+				this.markers.length - this.idx
+			} markers unconsumed); the client rendered more or different content than SSR.`,
+			hasUnconsumed && __hydrateDevMode
+		);
 		return document.createElement(tag || 'div');
 	}
 
@@ -423,42 +753,122 @@ class WalkerEngine implements HydrateWalker {
 	}
 
 	subWalker(rootEl: HTMLElement): HydrateWalker {
-			const subMarkers = this.markers.slice(this.idx).filter((m) => {
-				if (m.state === 'claimed') return false;
-				if (rootEl === (m.comment as unknown as HTMLElement)) return true;
-				if (!rootEl || !m.comment) return false;
-				if (typeof rootEl.contains === 'function') return rootEl.contains(m.comment);
-				return false;
-			});
-			this.idx += subMarkers.length;
-		for (const m of subMarkers) m.state = 'claimed';
-		return new WalkerEngine(rootEl, subMarkers.map((m) => m.comment));
+		// Ownership TRANSFER (Hydrate-Todo B3): the child's markers are
+		// spliced out of this walk — exactly one engine owns each marker, so
+		// no cursor arithmetic can drift and no shared refs can double-claim.
+		// The old `idx += count` assumed document order == marker order.
+		const owned: TrackedMarker[] = [];
+		const kept: TrackedMarker[] = [];
+		for (const m of this.markers) {
+			let mine = false;
+			if (m.state !== 'claimed') {
+				if (rootEl === (m.comment as unknown as HTMLElement)) mine = true;
+				else if (rootEl && m.comment && typeof rootEl.contains === 'function') mine = rootEl.contains(m.comment);
+			}
+			if (mine) {
+				m.state = 'claimed';
+				owned.push(m);
+			} else {
+				kept.push(m);
+			}
+		}
+		this.markers = kept;
+		if (this.idx > this.markers.length) this.idx = this.markers.length;
+		return new WalkerEngine(rootEl, owned.map((m) => m.comment));
 	}
 
-	claimByKey(key: string): HydrateClaim | null {
+	// Retire every unclaimed marker in the whole walk that points at `el`.
+	// Used after a cross-position adopt (relocate): the adopted node moves to
+	// the cursor, so alias markers stacked at its old station would otherwise
+	// dangle — pointing at its successor and misaligning later claims.
+	private retireAliasesOf(el: Element): void {
+		for (const tm of this.markers) {
+			if (tm.state !== 'claimed' && tm.comment.nextElementSibling === el) {
+				tm.state = 'claimed';
+				tm.comment.remove();
+			}
+		}
+	}
+
+	private adoptKeyedElement(tm: TrackedMarker, el: Element): HydrateClaim {
+		tm.state = 'claimed';
+		this.recordAdopted(el);
+		checkMarkerIdentity(tm.comment, el);
+		tm.comment.remove();
+		stripDirectTextNodes(el);
+		captureSsrElementChildren(el);
+		stampClaimed(el);
+		return { el };
+	}
+
+	claimByKey(key: string, options?: ClaimByKeyOptions): HydrateClaim | null {
 		const strKey = String(key);
 		// Strict positional claim: the item claims the cursor's marker. Interior
 		// markers of the previously-claimed item are consumed by that item's own
 		// render, so by the time we get here the cursor points at this item's
 		// SSR root. Only EXACT ordering SSR == client is claimed; divergence
-		// renders the item fresh at the region tail (canary reports the ghost).
+		// renders the item fresh at the region tail (canary reports the ghost)
+		// unless `relocate` upgrades the miss to adopt+move (Hydrate-Todo A4).
 		for (let i = this.idx; i < this.markers.length; i++) {
 			const tm = this.markers[i];
 			if (tm.state === 'claimed') continue;
 			const el = tm.comment.nextElementSibling;
 			if (this.isAlreadyAdopted(tm, el)) continue;
 			if (el && el.getAttribute('data-vsk-key') === strKey) {
-				tm.state = 'claimed';
-				this.recordAdopted(el);
+				const claim = this.adoptKeyedElement(tm, el);
 				this.retireAliases(el);
-				tm.comment.remove();
-				stripDirectTextNodes(el);
-				captureSsrElementChildren(el);
-				stampClaimed(el);
-				return { el };
+				return claim;
 			}
 			// First unclaimed marker is not this item — don't scan past it.
+			if (options && options.relocate) {
+				const moved = this.relocateByKey(strKey, tm);
+				if (moved) return moved;
+			}
+			// If the key exists later in the region this is a genuine SSR↔client
+			// reorder; without relocate the item renders fresh at the tail
+			// while its SSR twin rots. Report it so reorder divergence is
+			// visible instead of silent.
+			if (this.peekKey(strKey) !== null) {
+				reportMiss(
+					'key-reorder',
+					`keyed item "${strKey}" is not at the cursor; SSR order and client order diverge — item renders fresh, SSR twin orphaned.`,
+					__hydrateDevMode
+				);
+			}
 			return null;
+		}
+		return null;
+	}
+
+	// A4 adopt+move: find `key` anywhere later in the walk, adopt it in place,
+	// then move it to the cursor (`anchor`, the mismatching marker) so region
+	// order converges to client order with node identity preserved. The cursor
+	// itself does not advance — skipped markers still belong to their owners.
+	// Returns null when the key has no live SSR node (genuinely new item).
+	private relocateByKey(strKey: string, anchor: TrackedMarker): HydrateClaim | null {
+		for (let j = this.idx; j < this.markers.length; j++) {
+			const tm = this.markers[j];
+			if (tm.state === 'claimed') continue;
+			const el = tm.comment.nextElementSibling;
+			if (!el || this.adopted.has(el)) continue;
+			if (el.getAttribute('data-vsk-key') !== strKey) continue;
+			const parent = el.parentNode;
+			const anchorParent = anchor.comment.parentNode;
+			if (!parent || parent !== anchorParent) continue;
+			const claim = this.adoptKeyedElement(tm, el);
+			this.retireAliasesOf(el);
+			try {
+				parent.insertBefore(el, anchor.comment);
+			} catch {
+				// A failed move must not strand an adopted node: the claim
+				// stands (identity preserved) and order falls back to markers.
+			}
+			reportMiss(
+				'key-reorder',
+				`keyed item "${strKey}" adopted out of position and moved into place; SSR order and client order diverged.`,
+				false
+			);
+			return claim;
 		}
 		return null;
 	}
@@ -537,50 +947,139 @@ export function hydrate(
 }
 
 // ---------------------------------------------------------------------------
+// Deferred-hydration liveness (Hydrate-Todo A3).
+//
+// RULE: never hydrate a dead page. A deferred batch (viewport/idle/
+// interaction) may fire after an SPA navigation replaced the content it was
+// meant to claim — running componentFn then mounts duplicate content and leaks
+// effects into detached DOM. Every batch re-validates:
+//   1. container still connected (`isConnected`),
+//   2. no newer navigation happened since the strategy started (epoch compare),
+//      unless the caller supplies its own `isCurrent` gate.
+// The router bumps the epoch on every navigation (see `bumpNavEpoch`).
+// ---------------------------------------------------------------------------
+
+export interface DeferredHydrationOptions {
+	/**
+	 * Custom liveness gate. When provided it replaces the epoch compare
+	 * (the `isConnected` check always runs). Return false to drop the batch.
+	 */
+	isCurrent?: () => boolean;
+}
+
+export function bumpNavEpoch(): number {
+	try {
+		const g = globalThis as Record<string, unknown>;
+		const next = ((g.__vesk_nav_epoch as number) || 0) + 1;
+		g.__vesk_nav_epoch = next;
+		return next;
+	} catch {
+		return 0;
+	}
+}
+
+function navEpoch(): number {
+	try {
+		return ((globalThis as Record<string, unknown>).__vesk_nav_epoch as number) || 0;
+	} catch {
+		return 0;
+	}
+}
+
+function batchAlive(
+	container: HTMLElement,
+	epoch: number,
+	isCurrent?: () => boolean,
+): boolean {
+	try {
+		if (!container.isConnected) return false;
+	} catch {
+		return false;
+	}
+	if (isCurrent) {
+		try {
+			return isCurrent() !== false;
+		} catch {
+			return false;
+		}
+	}
+	return navEpoch() === epoch;
+}
+
+// ---------------------------------------------------------------------------
 // Viewport viewport hydration: markers below the fold are held until the
 // observer reports them intersecting. The hold is tracked explicitly (no
 // `vsk-hold` text mutation, no `_observed` monkey-patch) so the marker state
 // machine stays unambiguous and `assertFullyHydrated` can count held markers.
 // ---------------------------------------------------------------------------
 
+export interface ViewportHydrationHandle extends Promise<void> {
+	cancel(): void;
+}
+
 export function hydrateViewport(
 	container: HTMLElement,
 	componentFn: (props: Record<string, unknown>, registry: Map<string, unknown>, walker: HydrateWalker) => unknown,
 	props?: Record<string, unknown>,
 	rootMargin = 500,
-): Promise<void> {
-	if (document.readyState !== 'complete') {
-		return new Promise<void>((resolve) => {
-			const onLoad = () => {
-				window.removeEventListener('load', onLoad);
-				resolve(hydrateViewport(container, componentFn, props, rootMargin));
-			};
-			window.addEventListener('load', onLoad);
-		});
-	}
-	const allMarkers = collectVskMarkers(container);
-
-	const viewportMarkers: Comment[] = [];
-	const deferredMarkers: Comment[] = [];
-	for (const marker of allMarkers) {
-		const el = marker.nextElementSibling;
-		if (!el) { deferredMarkers.push(marker); continue; }
-		const rect = el.getBoundingClientRect();
-		if (rect.bottom < -rootMargin || rect.top > window.innerHeight + rootMargin) {
-			deferredMarkers.push(marker);
-		} else {
-			viewportMarkers.push(marker);
+	options: DeferredHydrationOptions = {},
+): ViewportHydrationHandle {
+	const epoch = navEpoch();
+	const isCurrent = options.isCurrent;
+	let cancelled = false;
+	let cancelFn: () => void = () => {};
+	const promise = new Promise<void>((resolve) => {
+		const finish = (): void => {
+			cancelled = true;
+			cancelFn = () => {};
+			resolve();
+		};
+		cancelFn = finish;
+		if (!batchAlive(container, epoch, isCurrent)) return finish();
+		start();
+		function start(): void {
+			if (cancelled) return finish();
+			if (document.readyState !== 'complete') {
+				const onLoad = () => {
+					window.removeEventListener('load', onLoad);
+					if (cancelled || !batchAlive(container, epoch, isCurrent)) return finish();
+					begin();
+				};
+				window.addEventListener('load', onLoad);
+				return;
+			}
+			begin();
 		}
-	}
+		function begin(): void {
+			const allMarkers = collectVskMarkers(container);
 
-	const held = new Set<Comment>(deferredMarkers);
+			const viewportMarkers: Comment[] = [];
+			const deferredMarkers: Comment[] = [];
+			for (const marker of allMarkers) {
+				const el = marker.nextElementSibling;
+				if (!el) { deferredMarkers.push(marker); continue; }
+				const rect = el.getBoundingClientRect();
+				if (rect.bottom < -rootMargin || rect.top > window.innerHeight + rootMargin) {
+					deferredMarkers.push(marker);
+				} else {
+					viewportMarkers.push(marker);
+				}
+			}
 
-	const viewportWalker = createHydrateWalker(container, viewportMarkers);
-	runInHydrateBlock(() => componentFn(props || {}, new Map(), viewportWalker));
+			const held = new Set<Comment>(deferredMarkers);
 
-	if (deferredMarkers.length > 0) {
-		return new Promise<void>((resolve) => {
+			const viewportWalker = createHydrateWalker(container, viewportMarkers);
+			runInHydrateBlock(() => componentFn(props || {}, new Map(), viewportWalker));
+
+			if (deferredMarkers.length === 0) {
+				assertFullyHydrated(container);
+				return finish();
+			}
 			const observer = new IntersectionObserver((entries) => {
+				if (!batchAlive(container, epoch, isCurrent)) {
+					observer.disconnect();
+					return finish();
+				}
 				const toHydrate: Comment[] = [];
 				for (const entry of entries) {
 					if (entry.isIntersecting) {
@@ -597,62 +1096,78 @@ export function hydrateViewport(
 					}
 				}
 				if (toHydrate.length > 0) {
+					if (!batchAlive(container, epoch, isCurrent)) {
+						observer.disconnect();
+						return finish();
+					}
 					const w = createHydrateWalker(container, toHydrate);
 					runInHydrateBlock(() => componentFn(props || {}, new Map(), w));
 				}
 				if (held.size === 0) {
 					observer.disconnect();
 					assertFullyHydrated(container);
-					resolve();
+					return finish();
 				}
 			}, { rootMargin: `${rootMargin}px` });
+			cancelFn = () => {
+				try {
+					observer.disconnect();
+				} catch {
+					// ignore disconnect failures
+				}
+				finish();
+			};
 			for (const marker of deferredMarkers) {
 				const el = marker.nextElementSibling;
 				if (el) observer.observe(el);
 			}
-		});
-	}
-
-	assertFullyHydrated(container);
-	return Promise.resolve();
+		}
+	});
+	return Object.assign(promise, { cancel: () => cancelFn() });
 }
 
+export interface IdleHydrationOptions extends HydrateIdleOptions, DeferredHydrationOptions {}
+
+/**
+ * Idle hydration (Hydrate-Todo B2): waits for the first idle window, then
+ * hydrates the whole container in ONE full run and stops.
+ *
+ * A previous design re-invoked the component once per marker chunk. That is
+ * irreparably unsafe without codegen yield points: every run claims its own
+ * chunk but misses everything else, so each run twins out-of-chunk SSR content
+ * with fresh nodes AND double-registers effects. Single-shot keeps the RULE
+ * (no duplication); true intra-render time-slicing needs compiler support and
+ * `chunkSize` is reserved for it (accepted, currently no effect).
+ */
 export function hydrateIdle(
 	container: HTMLElement,
 	componentFn: (props: Record<string, unknown>, registry: Map<string, unknown>, walker: HydrateWalker) => unknown,
 	props?: Record<string, unknown>,
-	options: HydrateIdleOptions = {},
+	options: IdleHydrationOptions = {},
 ): HydrateCancelBase {
-	const allMarkers = collectVskMarkers(container);
-	const chunkSize = options.chunkSize || 10;
+	const epoch = navEpoch();
+	const isCurrent = options.isCurrent;
 	const timeout = options.timeout || 3000;
-	let idx = 0;
 
 	const rIC = window.requestIdleCallback || ((cb: IdleRequestCallback) => setTimeout(cb, 50));
 	const cIC = window.cancelIdleCallback || clearTimeout;
 
 	let rafId: number | null = null;
 	let cancelled = false;
+	let ran = false;
 
-	function processChunk(deadline?: IdleDeadline) {
-		if (cancelled) return;
-		const end = Math.min(idx + chunkSize, allMarkers.length);
-		const chunk = allMarkers.slice(idx, end);
-		idx = end;
-
-		if (chunk.length > 0) {
-			const walker = createHydrateWalker(container, chunk);
-			runInHydrateBlock(() => componentFn(props || {}, new Map(), walker));
-		}
-
-		if (idx < allMarkers.length && (!deadline || deadline.timeRemaining() > 0 || deadline.didTimeout)) {
-			rafId = rIC(processChunk as IdleRequestCallback, { timeout });
-		} else if (idx >= allMarkers.length) {
-			assertFullyHydrated(container);
-		}
+	function runOnce() {
+		if (cancelled || ran) return;
+		ran = true;
+		// Liveness at fire time: an idle callback landing after navigation
+		// must not hydrate replaced DOM.
+		if (!batchAlive(container, epoch, isCurrent)) return;
+		const walker = createHydrateWalker(container);
+		runInHydrateBlock(() => componentFn(props || {}, new Map(), walker));
+		assertFullyHydrated(container);
 	}
 
-	rafId = rIC(processChunk as IdleRequestCallback, { timeout });
+	rafId = rIC(runOnce as IdleRequestCallback, { timeout });
 
 	return {
 		cancel() {
@@ -667,17 +1182,21 @@ export function hydrateIdle(
 
 export function needsHydration(container: HTMLElement): boolean {
 	const walker = document.createTreeWalker(container, _SHOW_COMMENT, {
-		acceptNode: (node) => (node.textContent === 'vsk' ? _FILTER_ACCEPT : _FILTER_SKIP),
+		acceptNode: (node) => (isVskMarkerText(node.textContent) ? _FILTER_ACCEPT : _FILTER_SKIP),
 	});
 	return walker.nextNode() !== null;
 }
+
+export interface InteractionHydrationOptions extends HydrateInteractionOptions, DeferredHydrationOptions {}
 
 export function hydrateOnInteraction(
 	container: HTMLElement,
 	componentFn: (props: Record<string, unknown>, registry: Map<string, unknown>, walker: HydrateWalker) => unknown,
 	props?: Record<string, unknown>,
-	options: HydrateInteractionOptions = {},
+	options: InteractionHydrationOptions = {},
 ): HydrateCancel {
+	const epoch = navEpoch();
+	const isCurrent = options.isCurrent;
 	const events = options.events || ['click', 'touchstart', 'focus', 'mouseenter'];
 	let hydrated = false;
 
@@ -688,6 +1207,10 @@ export function hydrateOnInteraction(
 		for (const ev of events) {
 			container.removeEventListener(ev, handler);
 		}
+
+		// An interaction that arrives after navigation must not hydrate the
+		// previous page's markers into replaced content.
+		if (!batchAlive(container, epoch, isCurrent)) return;
 
 		const markers = collectVskMarkers(container);
 		if (markers.length > 0) {
@@ -713,7 +1236,7 @@ export function hydrationCount(container: HTMLElement): number {
 	let count = 0;
 	const walker = document.createTreeWalker(container, _SHOW_COMMENT, {
 		acceptNode: (node) => {
-			if (node.textContent === 'vsk') { count++; return _FILTER_ACCEPT; }
+			if (isVskMarkerText(node.textContent)) { count++; return _FILTER_ACCEPT; }
 			return _FILTER_SKIP;
 		},
 	});

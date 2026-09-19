@@ -19,8 +19,8 @@ Vesk code. It provides:
 - **Blocks** — the unit of reactive DOM/render work (`block`, `effect`,
   `render`, `root`, `branch`, `pre_effect`), with a bidirectional linked list
   tree used for scoped flushing, pausing, and teardown.
-- **Hydration** — claiming SSR-issued DOM by scanning `<!--vsk-->` marker
-  comments, with several strategies (full, viewport, idle, interaction).
+- **Hydration** — claiming SSR-issued DOM by scanning keyed `<!--vsk:…-->` marker
+  comments (`c:Name` components, `t:tag` static subtrees; no bare markers), with several strategies (full, viewport, idle, interaction).
 - **Server APIs** — resource handoff, ISR caching, the request abstraction
   (`ServerRequest`/`VeskRequest`/`ServerResponse`/`VeskResponse`), cookies,
   headers, hooks, validation, webhooks, signed cookies, and CORS.
@@ -59,7 +59,7 @@ All under `packages/runtime/src/`:
 | `ripple-constants.ts` | Bit-flag constants for block/tracked flags and symbols (`ROOT_BLOCK`, `DERIVED`, `UNINITIALIZED`, `NAMESPACE_URI`, suspense symbols …). |
 | `ripple-utils.ts` | Tiny helpers (`is_ripple_object`, `define_property`, array/keys shims). |
 | `track.ts` | **[Legacy / unused, not in any barrel]** — a separate, older reactivity module with its own `Cell`, `Effect`, `track`, `effect`, `derived`, and a **`batch`** function. It is compiled into `dist/` but is not re-exported and is not imported by the runtime, compiler, or CLI. **Do not import it.** The active runtime is `ripple-runtime.ts` + `ripple-blocks.ts`. |
-| `hydrate.ts` | SSR DOM claiming via `<!--vsk-->` markers; walker; full/viewport/idle/interaction strategies; `reactiveProps`. |
+| `hydrate.ts` | SSR DOM claiming via keyed markers (`c:Name`/`t:tag`, no bare); walker with identity asserts + skew checks; full/viewport/idle/interaction strategies; `reactiveProps`; `auditHydration`; strict mode. |
 | `context.ts` | `createContext` / `Context<T>` provider-consumer with active-component lookup. |
 | `router.ts` | Router factory (`createRouter`, `createFileRouter`), route-data fetching, chunk loading, navigation. |
 | `router-components.ts` | `Outlet`, `Link`, `NavLink`, router hooks (`useNavigate`/`useParams`/`usePathname`/`useSearchParams`/`useRouter`), `Redirect`/`notFound`, head/scroll handling. |

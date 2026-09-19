@@ -143,7 +143,7 @@ async function runProdHydrationTests() {
     // /blog via the router (pushState). back/forward then exercise popstate
     // handling (a cross-document back would be a plain reload, not SPA).
     await page.goto(BASE + '/blog/hello-world', { waitUntil: 'networkidle0' });
-    await page.waitForFunction(() => !document.body.innerHTML.includes('<!--vsk-->'), { timeout: 15000 }).catch(() => {});
+    await page.waitForFunction(() => !/<!--vsk(--|:)/.test(document.body.innerHTML), { timeout: 15000 }).catch(() => {});
     await new Promise(r => setTimeout(r, 300));
     await page.evaluate(() => { window.__spaFlag = true; });
     await page.click('a[href="/blog"]');
@@ -178,7 +178,7 @@ async function runProdHydrationTests() {
   {
     const page = await browser.newPage();
     await page.goto(BASE + '/', { waitUntil: 'networkidle0' });
-    const markers = await page.evaluate(() => document.body.innerHTML.match(/<!--vsk-->/g) || []);
+    const markers = await page.evaluate(() => document.body.innerHTML.match(/<!--vsk(--|:)/g) || []);
     assert(markers.length === 0, 'All markers consumed');
     const navLinks = await page.evaluate(() => Array.from(document.querySelectorAll('nav a')).map(a => a.textContent.trim()));
     assert(navLinks.includes('Home') && navLinks.includes('About') && navLinks.includes('Blog'), `Nav: ${navLinks.join(', ')}`);

@@ -94,6 +94,28 @@ describe('Client Codegen — DOM Creation', () => {
 			expect(code).not.toContain('setAttribute');
 		}
 	});
+
+	// No empty-string placeholder for expression-valued attributes on the
+	// client: `setAttribute("disabled", "")` sets the IDL disabled property
+	// true in real browsers even when the prop is undefined/false. The
+	// guarded effect below must own presence entirely.
+	bothModes('no empty placeholder for dynamic attributes', `
+		component App(props: { d?: boolean }) { return <button disabled={props.d}>x</button>; }
+	`, (code) => {
+		expect(code).not.toContain('setAttribute("disabled", ""');
+		expect(code).toContain('__v != null && __v !== false');
+	});
+
+	// Dynamic attributes must omit undefined/false instead of
+	// serializing `disabled="undefined"` (which disables the element).
+	bothModes('guards dynamic attribute rendering', `
+		component App(props: { d?: boolean }) { return <button disabled={props.d}>x</button>; }
+	`, (code) => {
+		expect(code).not.toContain('setAttribute("disabled", String');
+		if (code.includes('effects')) {
+			expect(code).toContain('__v != null && __v !== false');
+		}
+	});
 	bothModes('sets static attributes statement mode', `
 		component App { <div class="foo">Hi</div> }
 	`, (code, mode) => {
@@ -124,7 +146,7 @@ describe('Client Codegen — DOM Creation', () => {
 
 describe('Client Codegen — Hydrate call-site boundaries', () => {
 
-	// SSR emits `<!--vsk-->` marker + the component's own root; no
+	// SSR emits a keyed marker (`<!--vsk:c:Name-->` / `<!--vsk:t:tag-->`) + the component's own root; no
 	// display:contents wrapper anywhere.
 	bothModes('component call emits no wrapper element', `
 		component Nav { return <header class="sticky">Hi</header>; }
@@ -206,6 +228,37 @@ describe('Client Codegen — Reactivity', () => {
 	`, (code) => {
 		expect(code).toContain('effect(');
 		expect(code).toContain('props.n');
+	});
+
+	// A5: sole dynamic text child hydrates from the SSR snapshot (expression)
+	bothModes('sole dynamic text snapshot init expression mode', `
+		component App(props: { n: number }) { return <div>{props.n}</div>; }
+	`, (code, mode) => {
+		expect(code).toContain('effect(');
+		if (mode === 'hydrate') expect(code).toContain('__vsk_ssrText');
+		else expect(code).not.toContain('__vsk_ssrText');
+	});
+	// A5: sole dynamic text child hydrates from the SSR snapshot (statement)
+	bothModes('sole dynamic text snapshot init statement mode', `
+		component App(props: { n: number }) {
+			<div>{props.n}</div>
+		}
+	`, (code, mode) => {
+		expect(code).toContain('effect(');
+		if (mode === 'hydrate') expect(code).toContain('__vsk_ssrText');
+		else expect(code).not.toContain('__vsk_ssrText');
+	});
+	// A5: multiple text children keep the empty initial (no blob to split)
+	bothModes('multi dynamic text keeps empty initial', `
+		component App(props: { a: string, b: string }) { return <div>{props.a}{props.b}</div>; }
+	`, (code, mode) => {
+		if (mode === 'hydrate') expect(code).not.toContain('__vsk_ssrText');
+	});
+	// A5: mixed static + dynamic text keeps the empty initial
+	bothModes('mixed static/dynamic text keeps empty initial', `
+		component App(props: { n: number }) { return <div>hi {props.n}</div>; }
+	`, (code, mode) => {
+		if (mode === 'hydrate') expect(code).not.toContain('__vsk_ssrText');
 	});
 
 	// Dynamic attribute — expression mode
@@ -496,6 +549,18 @@ describe('Client Codegen — layout slot scoping & claimed-sibling appends', () 
 		}
 	});
 
+	// `props.children` inside a ternary branch must insert the slot nodes —
+	// not degrade to a text binding (`String(props.children)` renders the
+	// literal "[object DocumentFragment]" instead of the page content).
+	bothModes('ternary branch with props.children inserts slot nodes', `
+		component Layout(props) {
+			<div>{props.active ? props.children : <p>empty</p>}</div>
+		}
+	`, (code) => {
+		expect(code).not.toContain('String(props.children)');
+		expect(code).toContain('appendChild(props.children)');
+	});
+
 	// Fresh static/dynamic text inside a claimed element that also holds SSR
 	// element children (a component-boundary wrapper) must be inserted at its
 	// SSR position — before the residue — not blindly appended at the end
@@ -598,6 +663,16 @@ describe('Client Codegen — Event Handlers', () => {
 		expect(code).toContain('addEventListener');
 		expect(code).toContain('change');
 		expect(code).toContain('blur');
+	});
+	// Delegate dispatch must not stop at the nearest event-capable element when
+	// its handler is undefined (`<Button/>` forwards an optional onClick that
+	// was never passed). It walks ancestors so a real wrapper handler still fires.
+	bothModes('delegated events fall through an undefined handler to an ancestor', `
+		component App { return <div onClick={() => {}}><button onClick={undefined}>x</button></div>; }
+	`, (code) => {
+		expect(code).toContain('while (el && el.nodeType === 1)');
+		expect(code).toContain('el = el.parentElement;');
+		expect(code).not.toContain("closest('[data-vsk-ev]')");
 	});
 });
 
@@ -1215,6 +1290,29 @@ describe('Keyed for-of with ; key clause and #empty block', () => {
 		}
 	});
 
+	bothModes('key expression referencing the index variable binds the index', `
+		component App(props: { todos: { id: number, text: string }[] }) {
+			for (const todo of props.todos; key i; index i) {
+				<li>{i}: {todo.text}</li>
+			}
+		}
+	`, (code) => {
+		if (!code.includes('reconcile')) throw new Error('Expected reconcile import, got:\n' + code);
+		// The key function runs outside the item renderer, so the index must be
+		// bound as its own parameter — `todo => i` would close over an undefined
+		// `i` (ReferenceError at first render/hydrate). Parameters must be
+		// parenthesized, or `todo, i => i` parses as a comma sequence expression
+		// when passed in argument position to `reconcile`.
+		if (!/\(\s*todo\s*,\s*i\s*\)\s*=>\s*i\b/.test(code)) {
+			throw new Error('Expected parenthesized key function binding the index variable, got:\n' + code);
+		}
+		try {
+			new Function('track, effect, reconcile', stripModuleWrapper(code));
+		} catch (e) {
+			throw new Error(`Syntax error: ${e.message}\n\n${code}`);
+		}
+	});
+
 	bothModes('classic for-loop with key variable still compiles', `
 		component App() {
 			for (let key = 0; key < 5; key++) {
@@ -1224,6 +1322,34 @@ describe('Keyed for-of with ; key clause and #empty block', () => {
 	`, (code) => {
 		try {
 			new Function('track, effect', stripModuleWrapper(code));
+		} catch (e) {
+			throw new Error(`Syntax error: ${e.message}\n\n${code}`);
+		}
+	});
+});
+
+describe('Keyed map nested in a branch builder', () => {
+	bothModes('nested keyed map registers its effect in the enclosing scope', `
+		component App(props: { items: { id: number, text: string }[] }) {
+			if (props.items.length === 0) {
+				<p>empty</p>
+			} else {
+				for (const todo of props.items; key todo.id) {
+					<li>{todo.text}</li>
+				}
+			}
+		}
+	`, (code) => {
+		if (!/reconcile\w*\(/.test(code)) throw new Error('Expected reconcile call, got:\n' + code);
+		// The reconciler updater is declared inside the branch builder, so its
+		// effect must be created in that same scope (registered on the
+		// enclosing effects array) — never flushed to the component top level
+		// where the name is out of scope (`$nNN is not defined` at hydration).
+		if (!/\.push\(\(\(\) => \{\s*let __first = true;\s*return effect\(/.test(code)) {
+			throw new Error('Expected map effect registered inline on enclosing effects array, got:\n' + code);
+		}
+		try {
+			new Function('track, effect, reconcile', stripModuleWrapper(code));
 		} catch (e) {
 			throw new Error(`Syntax error: ${e.message}\n\n${code}`);
 		}
@@ -1547,8 +1673,18 @@ describe('Client Codegen — While / Do-While / For / Switch Blocks', () => {
 			expect(code).toContain('__cl.push(');
 			expect(code).toContain('const __cl = [];');
 			expect(code).toContain('const $root = __hydrate.root;');
+			// $mount split: a hydrator returns the component's own first
+			// top-level node so callers never receive (and re-insert) the
+			// shared page container. Regression anchor for the verify-page
+			// blank/hydration-cycle bug (commit af11554).
+			expect(code).toContain('let $mount = null;');
+			expect(code).toContain('if ($mount === null) $mount = document.createDocumentFragment();');
+			expect(code).toContain('return __pendingChild || $mount;');
+			expect(code).not.toContain('return __pendingChild || $root;');
 		} else {
 			expect(code).toContain('document.createDocumentFragment();');
+			expect(code).toContain('return __pendingChild || $root;');
+			expect(code).not.toContain('$mount');
 			expect(code).not.toContain('__cl.push(');
 		}
 		expect(code).toContain('__place(');

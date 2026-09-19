@@ -897,7 +897,7 @@ it('useFetch failure in hydrate mode still emits hydration markers', async () =>
   show('  html', html.slice(0, 900));
   assert(calls === 1, `failing key should be fetched once across re-render passes (got ${calls})`);
   assert(html.includes('Failed to load posts'), `error branch should render in SSR body: ${html.slice(0, 900)}`);
-  assert(html.includes('<!--vsk-->'), `hydration markers missing on failed fetch: ${html.slice(0, 900)}`);
+  assert(html.includes('<!--vsk:t:div-->'), `hydration markers missing on failed fetch: ${html.slice(0, 900)}`);
 });
 
 it('awaiting a failing useFetch in an async component rejects the render (500 path)', async () => {
@@ -1533,7 +1533,7 @@ component App {
   return <Md content="### Hi" />;
 }`;
   const r = renderPage(source, 'App', {}, new Map(), { hydrate: true }) as { body: string };
-  assert(r.body.startsWith('<!--vsk--><div class="vesk-md">'), `hydrate marker missing: ${r.body}`);
+  assert(r.body.startsWith('<!--vsk:c:Md--><div class="vesk-md">'), `hydrate marker missing: ${r.body}`);
   assert(r.body.includes('<h3 id="hi">Hi</h3>'), `markdown missing in hydrate output: ${r.body}`);
 });
 

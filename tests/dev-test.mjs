@@ -247,7 +247,7 @@ async function waitForHydration(page, timeout = 10000) {
     const page = await browser.newPage();
     await page.goto(BASE, { waitUntil: 'networkidle0' });
     await waitForHydration(page);
-    const markers = await page.evaluate(() => document.body.innerHTML.match(/<!--vsk-->/g) || []);
+    const markers = await page.evaluate(() => document.body.innerHTML.match(/<!--vsk(--|:)/g) || []);
     // With code-split dev builds, some markers may remain due to async chunk loading
     // or hydration warnings. We accept up to 10 markers remaining as long as the page is functional.
     const buttonExists = await page.evaluate(() => !!document.querySelector('button'));

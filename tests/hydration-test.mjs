@@ -871,7 +871,7 @@ async function main() {
     assert(postsPage.hasPostData, '/posts SSR page renders fetched post data');
     // Confirm vsk hydration markers exist in SSR output via fetch
     const rawHtml = await fetch(BASE + '/posts').then(r => r.text());
-    assert((rawHtml.match(/<!--vsk-->/g) || []).length > 0, '/posts SSR output contains <!--vsk--> hydration markers');
+    assert((rawHtml.match(/<!--vsk(--|:)/g) || []).length > 0, '/posts SSR output contains <!--vsk--> hydration markers');
 
     await page.close();
   }
@@ -1315,7 +1315,7 @@ async function main() {
     console.log('\n=== TEST 19: nested layout hydration ===');
     const NESTED = ['/store', '/store/widget'];
 
-    // Counts unclaimed hydration markers (`<!--vsk-->` / `<!--vsk-hold-->`
+    // Counts unclaimed hydration markers (`<!--vsk-->` / `<!--vsk:c:Name-->`)
     // comment nodes) inside #root. Text nodes containing the substring "vsk"
     // (e.g. code samples) are NOT markers and must not be counted.
     const countMarkers = () => page.evaluate(() => {

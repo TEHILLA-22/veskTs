@@ -1,6 +1,6 @@
 import { track, get, set, scope, set_active_block } from '@vesk/runtime/src/ripple-runtime';
 import { root } from '@vesk/runtime/src/ripple-blocks';
-import { createHydrateWalker, hydrateViewport, hydrateIdle, hydrateOnInteraction } from '@vesk/runtime/src/hydrate';
+import { createHydrateWalker, hydrateViewport, hydrateIdle, hydrateOnInteraction, bumpNavEpoch } from '@vesk/runtime/src/hydrate';
 import type { HydrateWalker } from '@vesk/runtime/src/hydrate';
 import { matchRoute, flattenLayoutChain, buildTreeFromMap } from '@vesk/runtime/src/router-match';
 import type { RouteNode, RouteMatch } from '@vesk/runtime/src/router-match';
@@ -1478,6 +1478,9 @@ export function createRouter(
 
 				const loadingFn = findLoadingComponent(match.matchChain as Record<string, unknown>[]);
 				this._navToken = (this._navToken || 0) + 1;
+				// Same deferred-hydration invalidation as the file-router path
+				// below (Hydrate-Todo A3).
+				bumpNavEpoch();
 				const navToken = this._navToken;
 				loadingStart();
 
@@ -1837,6 +1840,11 @@ export function createFileRouter(routeTree: RouteNode[], options: FileRouterOpti
 
 				const loadingFn = findLoadingComponent(match.matchChain as Record<string, unknown>[]);
 				router._navToken = (router._navToken || 0) + 1;
+				// Invalidate outstanding deferred hydration batches (viewport /
+				// idle / interaction) started for the previous page: their next
+				// batch sees the epoch change and stands down instead of
+				// claiming replaced DOM. See Hydrate-Todo A3.
+				bumpNavEpoch();
 				navDebug('navigate', url.pathname, 'token=' + router._navToken, 'pendingChunks', hasPendingChunks(match.matchChain));
 				const navToken = router._navToken;
 				loadingStart();

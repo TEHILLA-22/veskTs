@@ -26,7 +26,9 @@ function extractDataScript(html) {
 }
 
 function hasHydrationMarkers(html) {
-	return /<!--vsk-->/.test(html);
+	// Keyed-marker world: bare `<!--vsk-->` no longer emitted; component
+	// boundaries type `<!--vsk:c:Name-->`, static ones `<!--vsk:t:tag-->`.
+	return /<!--vsk(--|:)/.test(html);
 }
 
 function hasClientCode(html) {

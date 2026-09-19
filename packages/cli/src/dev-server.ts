@@ -8,7 +8,7 @@ import { stripCodeTypes } from '@vesk/compiler/src/strip-ts';
 import { renderPage, renderFullPage, renderPageStream, buildDataScripts, securityHeaders, corsHeaders, corsPreflight, createRateLimiter, applyTrustProxy, prettifyHtml, resolveComponentName, getClientProtocol, randomToken, DEFAULT_MAX_BODY_BYTES, applyHeadInjects, applyHtmlPlugins } from '@vesk/compiler/src/server-codegen';
 import { withSsrStore, ssrSink } from '@vesk/compiler/src/ssr-store';
 import { compileClient } from '@vesk/compiler/src/client-codegen';
-import { scanRoutes, matchUrl, collectSources } from '@vesk/compiler/src/router';
+import { scanRoutes, matchUrl, collectSources, scanComponents } from '@vesk/compiler/src/router';
 import { scanApiRoutes, matchApiUrl, buildWebRequest, executeApiRoute } from '@vesk/compiler/src/api-routes';
 import { collectMiddlewareChain, executeMiddlewareChain } from '@vesk/compiler/src/middleware';
 import { collectEventsFile, loadEvents, runEventHandlers } from '@vesk/compiler/src/events';
@@ -34,6 +34,8 @@ import type { RouteNode, VeskPlugin, VeskEventHandlers, ServerEventContext } fro
 import { getPluginRecords, filterActivePlugins } from '@vesk/adapter/src/plugins';
 import { resolveCssUrls, hasUserCss } from '@vesk/adapter/src/css';
 import { buildErrorPayload } from '@vesk/adapter/src/hmr';
+import { resolveClientErrorReport, resolveRuntimeErrorPayload, renderDevErrorPage, formatErrorLocation } from '@vesk/adapter/src/ssr-error';
+import type { ClientErrorReport, RuntimeErrorContext } from '@vesk/adapter/src/ssr-error';
 import { buildCodeframe } from '@vesk/adapter/src/error-codeframe';
 import type { HmrErrorPayload } from '@vesk/adapter/src/hmr';
 import { ensurePackagesBuilt } from './build-packages';
@@ -100,6 +102,102 @@ export function buildDevErrorPayload(input: BuildDevErrorInput): HmrErrorPayload
 
   if (!payload.message) payload.message = errorMessage || 'Unknown error';
   return payload;
+}
+
+export interface DevErrorReportContext {
+  projectDir: string;
+  appDir: string;
+  routeTree: RouteNode[];
+}
+
+/**
+ * Resolve a client-side runtime failure (`{ message, stack }` from the
+ * dev overlay's `reportRuntimeErrors`, carrying compiled-bundle coordinates)
+ * to the canonical HMR error payload (`.vsk` file + line/column + codeframe +
+ * tips). Pure except for guarded source reads — backs `POST
+ * /__vesk/error-resolve` and is unit-testable with a temp project dir.
+ */
+export function resolveDevErrorReport(report: unknown, ctx: DevErrorReportContext): HmrErrorPayload {
+  let componentMap: Map<string, string> | undefined;
+  let routeSources: Map<string, string> | undefined;
+  try {
+    componentMap = scanComponents(resolve(ctx.projectDir, 'components'));
+  } catch {
+    componentMap = undefined;
+  }
+  try {
+    routeSources = new Map<string, string>();
+    for (const [name, rel] of collectSources(ctx.routeTree || [])) {
+      routeSources.set(name, resolve(ctx.appDir, rel));
+    }
+  } catch {
+    routeSources = undefined;
+  }
+  try {
+    return resolveClientErrorReport((report || {}) as ClientErrorReport, {
+      appDir: ctx.appDir,
+      projectDir: ctx.projectDir,
+      componentMap,
+      routeSources,
+    });
+  } catch {
+    const rec = (report || {}) as Record<string, unknown>;
+    const out: HmrErrorPayload = {
+      file: '',
+      line: null,
+      column: null,
+      message: typeof rec.message === 'string' && rec.message ? rec.message : 'Unknown error',
+    };
+    if (typeof rec.stack === 'string') out.stack = rec.stack;
+    return out;
+  }
+}
+
+/**
+ * Resolver context for an SSR render failure on a matched route: the route's
+ * own `.vsk` files (page, layouts, error pages — deepest node first) plus the
+ * app-wide shared-component and route-source maps, so `X is not defined`
+ * resolves to the exact use site.
+ */
+export function devErrorContextForMatch(
+  match: { nodes?: Array<{ sourceDir?: string }> } | null,
+  appDir: string,
+  projectDir: string,
+  routeTree: RouteNode[],
+): RuntimeErrorContext {
+  const routeFiles: string[] = [];
+  try {
+    const nodes = Array.isArray(match?.nodes) ? [...(match as { nodes: Array<{ sourceDir?: string }> }).nodes].reverse() : [];
+    for (const kind of ['page.vsk', 'layout.vsk', 'error.vsk']) {
+      for (const node of nodes) {
+        if (!node || typeof node.sourceDir !== 'string') continue;
+        const p = resolve(appDir, node.sourceDir, kind);
+        try {
+          if (existsSync(p) && !routeFiles.includes(p)) routeFiles.push(p);
+        } catch {
+          /* ignore unreadable entries */
+        }
+      }
+    }
+  } catch {
+    /* route files are best-effort */
+  }
+  let componentMap: Map<string, string> | undefined;
+  let routeSources: Map<string, string> | undefined;
+  try {
+    componentMap = scanComponents(resolve(projectDir, 'components'));
+  } catch {
+    componentMap = undefined;
+  }
+  try {
+    routeSources = new Map<string, string>();
+    for (const [name, rel] of collectSources(routeTree || [])) {
+      routeSources.set(name, resolve(appDir, rel));
+    }
+  } catch {
+    routeSources = undefined;
+  }
+  return { appDir, projectDir, routeFiles, componentMap, routeSources };
 }
 
 function resolveRuntimeDir(projectDir: string): string | null {
@@ -397,6 +495,20 @@ function storeDataScript(payload: SsrDataPayload): string | null {
   const token = randomToken(12);
   ssrDataStore.set(token, payload);
   return '/_vesk/ssr-data.js?t=' + token;
+}
+
+// The buffered/streamed dev render loops render page + layouts through
+// renderPage (not renderFullPage), so they must rebuild the hydration payload
+// the same way renderFullPage does: merge the AsyncLocalStorage sink snapshot
+// with the request's per-token data slot. Resource callbacks (native fetch) write
+// the slot, but can land in a forked store that the sink snapshot misses — the
+// sink alone then serializes empty, the client refetches over correct SSR markup
+// and hydration drifts (claim misses, blank #root).
+function currentSsrData(): Record<string, unknown> {
+  const g = globalThis as Record<string, unknown>;
+  const token = g.__vsk_ssr_token as string | undefined;
+  const slot = (token ? (g[`__vsk_ssr_data_${token}`] as Record<string, unknown> | undefined) : undefined) || {};
+  return { ...((ssrSink.snapshot() as Record<string, unknown>) || {}), ...slot };
 }
 
 function countPages(nodes: RouteNode[]): number {
@@ -1149,6 +1261,21 @@ export async function startDevServer(port: number, projectDir: string, config: R
         const agentRes = await agentRouterMain.route(req.method || 'GET', url.pathname, body, url.search);
         if (agentRes) { writeDevPanelResponse(res, agentRes); return; }
       }
+      // Resolve a client-side runtime failure (compiled-bundle coordinates from
+      // the dev overlay) to the canonical HMR payload — same file/line +
+      // codeframe + tips reporting as HMR compile errors.
+      if (url.pathname === '/__vesk/error-resolve') {
+        if ((req.method || 'GET') !== 'POST') {
+          res.writeHead(405, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+          return;
+        }
+        const payload = resolveDevErrorReport(body, { projectDir, appDir: appDirPath, routeTree });
+        const secHeaders = security ? securityHeaders({ security }) : {};
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...secHeaders });
+        res.end(JSON.stringify(payload));
+        return;
+      }
       const devResponse = await devRouter.route(req.method || 'GET', url.pathname, body, url.search);
       if (devResponse) {
         writeDevPanelResponse(res, devResponse);
@@ -1304,7 +1431,21 @@ export async function startDevServer(port: number, projectDir: string, config: R
     const forData = req.headers['x-vesk-data'] === '1';
 
     async function renderSSR() {
-      return withSsrStore(async () => {
+      // Per-request SSR handoff isolation. renderPage (used for the
+      // page+layout chain below) reuses a live __vsk_ssr_token/slot but never
+      // cleans it up — only renderFullPage/renderPageStream own that cleanup.
+      // Without a reset here, the previous request's slot survives in
+      // currentSsrData() and every non-data route serializes a stale
+      // ssr-data script (Test 18 leak: /about, /blog, ... all carried the
+      // previous data route's payload). Fresh token + empty flat store per
+      // request; deleted below so the next request starts clean. Mirrors the
+      // adapter ssr-function.ts dataNavCleanup contract.
+      const ssg = globalThis as Record<string, unknown>;
+      const freshToken = Math.random().toString(36).slice(2);
+      ssg.__vsk_ssr_token = freshToken;
+      ssg.__vsk_ssr_data = {};
+      try {
+      return await withSsrStore(async () => {
       const chain = cleanChain;
       let body = '';
       let head = '';
@@ -1340,7 +1481,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
       const hasLayout = chain.some(n => n.layout && existsSync(resolve(appDirPath, n.sourceDir as string, 'layout.vsk')));
       let html: string;
       if (hasLayout) {
-        const ssrData = ssrSink.snapshot();
+        const ssrData = currentSsrData();
         const dataScripts = buildDataScripts(props, ssrData || {}, storeDataScript);
         const dataScriptBlock = dataScripts.length > 0 ? '\n' + dataScripts.join('\n') + '\n' : '';
         let secMeta = '';
@@ -1372,9 +1513,30 @@ export async function startDevServer(port: number, projectDir: string, config: R
       }
       return { html, props: props || { params: matched.params }, head };
       });
+      } finally {
+        delete ssg[`__vsk_ssr_data_${freshToken}`];
+        delete ssg[`__vsk_ssr_promises_${freshToken}`];
+        delete ssg[`__vsk_ssr_failures_${freshToken}`];
+        if (ssg.__vsk_ssr_token === freshToken) delete ssg.__vsk_ssr_token;
+        // Flat store is this request's scratch space (setSsrData mirrors here
+        // because ALS writes can land forked). Drop it so the next request
+        // can never settle from it via getSsrData's flat-mirror fallback.
+        // renderFullPage already deleted it in its own finally — harmless.
+        delete ssg.__vsk_ssr_data;
+      }
     }
 
     function renderSSRStream() {
+      // Same per-request isolation as renderSSR: the streamed layout path
+      // renders via renderPage (no renderFullPage cleanup), so without a
+      // fresh token/slot the previous request's data leaks into
+      // currentSsrData() and every streamed non-data route carries a stale
+      // ssr-data script. Token lives across the stream's yields; scoped()
+      // below deletes it once iteration ends.
+      const sst = globalThis as Record<string, unknown>;
+      const streamToken = Math.random().toString(36).slice(2);
+      sst.__vsk_ssr_token = streamToken;
+      sst.__vsk_ssr_data = {};
       async function* raw() {
       const chain = cleanChain;
       const hasLayout = chain.some(n => n.layout && existsSync(resolve(appDirPath, n.sourceDir as string, 'layout.vsk')));
@@ -1437,7 +1599,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
       yield '</head>\n<body>\n<div id="root">\n';
       yield prettifyHtml(body);
       yield '\n</div>\n';
-      const ssrData = ssrSink.snapshot();
+      const ssrData = currentSsrData();
       const dataScripts = buildDataScripts(props, ssrData || {}, storeDataScript);
       if (dataScripts.length > 0) yield dataScripts.join('\n') + '\n';
       // The streamed document must carry the client bundle (mirrors the
@@ -1448,11 +1610,19 @@ export async function startDevServer(port: number, projectDir: string, config: R
 
       const gen = raw();
       async function* scoped() {
+        try {
         let result: IteratorResult<string, void>;
         do {
           result = (await withSsrStore(() => gen.next())) as IteratorResult<string, void>;
           if (!result.done) yield result.value;
         } while (!result.done);
+        } finally {
+          delete sst[`__vsk_ssr_data_${streamToken}`];
+          delete sst[`__vsk_ssr_promises_${streamToken}`];
+          delete sst[`__vsk_ssr_failures_${streamToken}`];
+          if (sst.__vsk_ssr_token === streamToken) delete sst.__vsk_ssr_token;
+          delete sst.__vsk_ssr_data;
+        }
       }
       return scoped();
     }
@@ -1525,17 +1695,16 @@ export async function startDevServer(port: number, projectDir: string, config: R
             }
             return;
           }
-          const stream = renderSSRStream();
+          // Buffer the stream before touching the socket: a mid-render throw
+          // (e.g. `X is not defined`) must land in the catch below as a
+          // unified 500 dev page, not as a truncated 200 + ERR_HTTP_HEADERS_SENT
+          // crash. Dev favors the overlay over TTFB; prod streams untouched.
+          const chunks: string[] = [];
+          for await (const chunk of renderSSRStream()) chunks.push(chunk);
+          const html = injectDevScripts(chunks.join(''));
           logRequest(200);
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Transfer-Encoding': 'chunked', ...secHeaders });
-          for await (const chunk of stream) {
-            if (chunk.includes('</body>')) {
-              res.write(chunk.replace('</body>', '\t<script type="module" src="/_vesk/hmr.js"></script>\n</body>'));
-            } else {
-              res.write(chunk);
-            }
-          }
-          res.end();
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...secHeaders });
+          res.end(html);
         } finally {
           (globalThis as Record<string, unknown>).__vesk_request = prev;
         }
@@ -1571,6 +1740,43 @@ export async function startDevServer(port: number, projectDir: string, config: R
         res.writeHead(404, { 'Content-Type': 'text/html' });
         res.end(notFoundHtml || '<!DOCTYPE html><html><body><h1>404 — Not Found</h1></body></html>');
       } else {
+        // SSR runtime failure — report it exactly like an HMR compile error:
+        // resolve the throw to its `.vsk` file/line + codeframe + tips, replay
+        // it over the HMR socket (overlay + Errors panel + state endpoint),
+        // and hand the same detail to `error.vsk` instead of a bare message +
+        // compiled-bundle stack.
+        let devPayload: HmrErrorPayload | null = null;
+        try {
+          devPayload = resolveRuntimeErrorPayload(err, devErrorContextForMatch(match, appDirPath, projectDir, routeTree));
+        } catch {
+          devPayload = null;
+        }
+        if (devPayload) {
+          // NOTE: intentionally NOT persisted to devLastError. That slot is
+          // the compile-error state machine (set on bundle failure, cleared
+          // on successful rebuild, replayed to new WS connections + the state
+          // endpoint). An SSR throw is route-specific: persisting it made
+          // every later page (e.g. / after /store/boom) poll the stale
+          // payload via /__vesk/hmr/state and show its overlay on the wrong
+          // route. The failing request still surfaces live: WS broadcast
+          // below (open tabs), the rendered error.vsk page, and the
+          // vesk-ssr-error marker (boot overlay via error-resolve).
+          recordDiagnostic({
+            severity: 'error',
+            code: 'SSR_RUNTIME',
+            file: devPayload.file || null,
+            line: devPayload.line,
+            column: devPayload.column,
+            message: devPayload.code ? `[${devPayload.code}] ${devPayload.message}` : devPayload.message,
+            hint: (devPayload.tips && devPayload.tips[0]) || null,
+          });
+          if (typeof (globalThis as Record<string, unknown>).__vesk_broadcastHmr === 'function') {
+            ((globalThis as Record<string, unknown>).__vesk_broadcastHmr as (msg: Record<string, unknown>) => void)({
+              type: 'error',
+              ...devPayload,
+            });
+          }
+        }
         let errorHtml: string | null = null;
         if (match && match.nodes) {
           for (let i = match.nodes.length - 1; i >= 0; i--) {
@@ -1581,7 +1787,23 @@ export async function startDevServer(port: number, projectDir: string, config: R
                 try {
                   const errSrc = readFileSync(errPath, 'utf-8');
                   const errCompName = extractCompName(errSrc) || (node.error as string);
-                  const errProps = { error: err.message, stack: err.stack, statusCode: errorStatusCode(err), url: url.pathname };
+                  const errProps = {
+                    error: err.message,
+                    stack: err.stack,
+                    statusCode: errorStatusCode(err),
+                    url: url.pathname,
+                    ...(devPayload
+                      ? {
+                          code: devPayload.code,
+                          file: devPayload.file,
+                          line: devPayload.line,
+                          column: devPayload.column,
+                          tips: devPayload.tips,
+                          suggestions: devPayload.suggestions,
+                          nextSteps: devPayload.nextSteps,
+                        }
+                      : {}),
+                  };
                   const html = await renderFullPage(errSrc, errCompName, errProps, new Map(), { hydrate: true, cssUrls: activeCssUrls(), security, externalDataScript: storeDataScript, sourcePath: errPath, plugins: getActiveDevPlugins() as VeskPlugin[] });
                   errorHtml = injectDevScripts(html);
                 } catch (e2) {
@@ -1597,9 +1819,23 @@ export async function startDevServer(port: number, projectDir: string, config: R
         // it a refresh of a broken page gets no overlay and no HMR socket, so
         // the fix never reaches the tab (full refresh required). Bake the SSR
         // marker in so hmr-client pops the overlay on load.
-        const fallbackHtml = errorHtml || injectDevScripts(`<!DOCTYPE html><html><body><h1>${errCode}</h1><pre>${err.message}\n${err.stack}</pre></body></html>`);
+        const fallbackHtml = errorHtml || injectDevScripts(renderDevErrorPage(
+          devPayload || { file: '', line: null, column: null, message: err.message, stack: err.stack },
+          { status: errCode, url: url.pathname },
+        ));
         logRequest(errCode);
-        LOG.err(`[vsk:error] ${url.pathname} — ${err.message}`);
+        if (devPayload && devPayload.file) {
+          LOG.err(`[vsk:error] ${url.pathname} — ${formatErrorLocation(devPayload)} — ${devPayload.message}`);
+        } else {
+          LOG.err(`[vsk:error] ${url.pathname} — ${err.message}`);
+        }
+        // Headers may already be on the wire if an earlier branch started the
+        // response (streaming, middleware). A second writeHead throws
+        // ERR_HTTP_HEADERS_SENT and kills the dev server — never do that.
+        if (res.headersSent || res.writableEnded) {
+          try { res.end(); } catch { /* socket already gone */ }
+          return;
+        }
         res.writeHead(errCode, { 'Content-Type': 'text/html' });
         res.end(injectSsrErrorMarker(fallbackHtml, err));
       }

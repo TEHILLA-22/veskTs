@@ -3,7 +3,7 @@ import {
   StaticNode, TextNode, DynamicBinding, OpaqueDynamicRegion,
   MapRegion, WhileLoop, SwitchBlock, TryCatch, ForLoop,
   TrackDecl, RuntimeStatement, ComponentRef, ComponentCall,
-  ServerBlock, ClientBlock, HeadBlock, SlotNode,
+  ServerBlock, ClientBlock, HeadBlock, SlotNode, PropSlot, PropSlotRender,
 } from '@vesk/compiler/src/ir';
 import { isStaticIR, collectTrackedNames, transformTracked, transformTrackedInit, semicolonizeStatement, type TrackedInfo } from '@vesk/compiler/src/client-codegen';
 import { walk } from 'zimmerframe';
@@ -34,12 +34,27 @@ import { localValueImportNames } from '@vesk/compiler/src/module-imports';
 // The wrapper tag must be `<span>`, not `<div>`. The HTML parser implicitly
 // Marker-ONLY component boundary. The client's shared walker claims a
 // component call-site by reading the component's own root element off this
-// marker — the SSR output of a component call is exactly `<!--vsk-->` followed
+// marker — the SSR output of a component call is exactly the marker followed
 // by the callee's content. A `<span style="display:contents">` box here would
 // sit between the marker and that root, so a `nextElement(tag)` claim (e.g.
 // LoadingIndicator claiming `div`) hits a tag mismatch, never advances the
 // walker cursor, and every later claim miss wipes the SSR content.
-const HYDRATE_COMPONENT_WRAPPER = '<!--vsk-->';
+//
+// Every marker is keyed, no bare markers (Hydrate-Todo: keyed markers):
+// component boundaries carry the callee name (`<!--vsk:c:Name-->`),
+// static-subtree boundaries carry the tag (`<!--vsk:t:tag-->`). The walker
+// asserts the tag identity on adopt, reports skew deterministically, and names
+// every miss/orphan — divergence is pinpointed at the exact boundary instead
+// of cascading anonymously.
+function sanitizeMarkerName(name: string): string {
+  // No regex (compiler rule): identifiers cannot contain comment-breaking
+  // sequences, but guard anyway — `--` would terminate the HTML comment.
+  return String(name).split('--').join('-').split('<').join('').split('>').join('');
+}
+
+function componentMarker(compName: string): string {
+  return `<!--vsk:c:${sanitizeMarkerName(compName)}-->`;
+}
 
 export function irNodeToJS(node: IRNode, importedNames?: Set<string> | null, isAsync: boolean = false, tracked?: Map<string, TrackedInfo>): string {
   importedNames = importedNames || __vskImportedNames;
@@ -91,6 +106,8 @@ export function irNodeToJS(node: IRNode, importedNames?: Set<string> | null, isA
   }
   if (node instanceof RuntimeStatement) return semicolonizeStatement(transformTracked(node as any, tracked || new Map()));
   if (node instanceof SlotNode) return `__out.push(props.children || '');`;
+  if (node instanceof PropSlotRender) return `__out.push(props.${node.propName} || '');`;
+  if (node instanceof PropSlot) return '';
   return '';
 }
 
@@ -112,12 +129,10 @@ function staticNodeToJS(node: StaticNode, isAsync = false, tracked?: Map<string,
   const lines: string[] = [];
 
   const dynAttrTargets = new Set<string>();
-  const dynAttrOrder: string[] = [];
   for (const child of node.children) {
     if (child instanceof DynamicBinding && child.kind === 'attribute' && child.target !== null && child.target !== 'ref') {
       if (isEvent(child.target)) continue;
       dynAttrTargets.add(child.target);
-      dynAttrOrder.push(child.target);
     }
   }
   const hasDynamicAttrs = dynAttrTargets.size > 0;
@@ -126,7 +141,9 @@ function staticNodeToJS(node: StaticNode, isAsync = false, tracked?: Map<string,
   const forceClaim = takeVskForceClaim();
   const subtreeNeedsJS = __vskHydrate && (forceClaim || !isStaticIR(node.children));
   if (subtreeNeedsJS) {
-    lines.push(`__out.push('<!--vsk-->');`);
+    // Keyed static boundary (Hydrate-Todo: no bare markers): the walker
+    // asserts this tag on adopt and names it in every miss/orphan report.
+    lines.push('__out.push(' + JSON.stringify(`<!--vsk:t:${sanitizeMarkerName(node.tag)}-->`) + ');');
   }
   for (const attr of node.attributes) {
     if (isEvent(attr.name)) continue;
@@ -137,9 +154,6 @@ function staticNodeToJS(node: StaticNode, isAsync = false, tracked?: Map<string,
       openTag += ` ${attr.name}="${escapeHtml(attr.value)}"`;
     }
   }
-  for (const target of dynAttrOrder) {
-    openTag += ` ${target}=""`;
-  }
 
   if (node.selfClosing) {
     let tag = openTag + ' />';
@@ -147,8 +161,7 @@ function staticNodeToJS(node: StaticNode, isAsync = false, tracked?: Map<string,
       let expr = JSON.stringify(tag);
       for (const child of node.children) {
         if (child instanceof DynamicBinding && child.kind === 'attribute' && child.target !== 'ref' && !isEvent(child.target)) {
-          const val = `__escape(String(${exprJSX(child.expression, tracked)}))`;
-          expr = `${expr}.replace(${JSON.stringify(' ' + child.target + '=""')}, ' ' + ${JSON.stringify(child.target)} + '=\"' + ${val} + '\"')`;
+          expr += ` + __attr(${JSON.stringify(child.target)}, ${exprJSX(child.expression, tracked)})`;
         }
       }
       lines.push(`__out.push(${expr});`);
@@ -166,8 +179,7 @@ function staticNodeToJS(node: StaticNode, isAsync = false, tracked?: Map<string,
     let expr = JSON.stringify(openTag);
     for (const child of node.children) {
       if (child instanceof DynamicBinding && child.kind === 'attribute' && child.target !== 'ref' && !isEvent(child.target)) {
-        const val = `__escape(String(${exprJSX(child.expression, tracked)}))`;
-        expr = `${expr}.replace(${JSON.stringify(' ' + child.target + '=""')}, ' ' + ${JSON.stringify(child.target)} + '=\"' + ${val} + '\"')`;
+        expr += ` + __attr(${JSON.stringify(child.target)}, ${exprJSX(child.expression, tracked)})`;
       }
     }
     lines.push(`__out.push(${expr});`);
@@ -407,9 +419,28 @@ function componentCallToJS(node: ComponentCall, importedNames: Set<string> | nul
     propsEntries.push(`...${exprJSX(sp, tracked)}`);
   }
   const lines: string[] = [];
-  if (node.children.length > 0) {
+  // Named content slots (`trigger={<Button/>}`) thread through the same channel
+  // as `children`: a closed-over IIFE that serializes the slot body to a string.
+  const slotChildren = node.children.filter((c): c is PropSlot => c instanceof PropSlot);
+  const regularChildren = node.children.filter((c) => !(c instanceof PropSlot));
+  for (const slot of slotChildren) {
+    const slotLines: string[] = [];
+    for (const child of slot.body) {
+      const code = irNodeToJS(child, importedNames, isAsync, tracked);
+      if (code) slotLines.push(code);
+    }
+    if (slotLines.length > 0) {
+      const slotVar = `__sl${nextVskId()}`;
+      propsEntries.push(`${JSON.stringify(slot.propName)}: ${slotVar}`);
+      lines.push(`const ${slotVar} = ${isAsync ? 'await (async ' : '('}() => {`);
+      lines.push(`const __out = [];`);
+      lines.push(indent(slotLines.join('\n')));
+      lines.push(`return __out.join(''); })();`);
+    }
+  }
+  if (regularChildren.length > 0) {
     const childLines: string[] = [];
-    for (const child of node.children) {
+    for (const child of regularChildren) {
       const code = irNodeToJS(child, importedNames, isAsync, tracked);
       if (code) childLines.push(code);
     }
@@ -441,7 +472,7 @@ function componentCallToJS(node: ComponentCall, importedNames: Set<string> | nul
   lines.push(`const ${calleeVar} = ${callee};`);
   const callExpr = `${awaitKw}${calleeVar}(${propsObj}, __registry, (${calleeVar}.__veskScope || __vesk))`;
   if (__vskHydrate) {
-    lines.push(`__out.push(${JSON.stringify(HYDRATE_COMPONENT_WRAPPER)} + (${callExpr} || ''));`);
+    lines.push(`__out.push(${JSON.stringify(componentMarker(compName))} + (${callExpr} || ''));`);
   } else {
     lines.push(`__out.push(${callExpr} || '');`);
   }
@@ -459,6 +490,8 @@ export function generateFunctionBody(comp: ComponentIR, importedNames: Set<strin
   lines.push(`__sa({ c: null, p: __prev });`);
   lines.push(`try {`);
   lines.push(`const __escape = (s) => { s = String(s); return s.split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;').split(${JSON.stringify('"')}).join('&quot;'); };`);
+  lines.push(`const __styleText = (v) => { if (typeof v === 'string') return v; if (v && typeof v === 'object') { let s = ''; for (const k in v) { const x = v[k]; if (x == null || x === false) continue; s += k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase()) + ':' + x + ';'; } return s; } return String(v); };`);
+  lines.push(`const __attr = (n, v) => (v == null || v === false) ? '' : ' ' + n + '="' + __escape(n === 'style' ? __styleText(v) : String(v)) + '"';`);
   lines.push(`const raw = (s) => s == null ? '' : String(s);`);
   lines.push(`const __tk = globalThis.__vsk_ssr_token || '';`);
 

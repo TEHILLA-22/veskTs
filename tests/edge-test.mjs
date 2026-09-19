@@ -64,7 +64,7 @@ async function main() {
     const navOk = flat.includes('>Home<') && flat.includes('>About<') && flat.includes('>Blog<');
     assert(navOk, 'nav links present');
 
-    const markers = (html.match(/<!--vsk-->/g) || []).length;
+    const markers = (html.match(/<!--vsk(--|:)/g) || []).length;
     assert(markers > 0, `hydration markers present in SSR output (${markers})`);
     assert(flat.includes('<script type="module" src="/_vesk/static/client.js">'), 'client runtime script tag present');
   }
