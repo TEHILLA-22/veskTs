@@ -30,7 +30,7 @@ import { skipWhitespace, findBalancedEnd, splitTopLevel, startsWithIdentifier, s
 import { stripCodeTypes } from '@vesk/compiler/src/strip-ts';
 import { stripTypeImport } from '@vesk/compiler/src/vsk-imports';
 import { importBindingPairs } from '@vesk/compiler/src/module-imports';
-import { collectCalledIdentifiers, extractImportNames, importModuleTarget } from '@vesk/compiler/src/tokens';
+import { extractImportNames, importModuleTarget } from '@vesk/compiler/src/tokens';
 import type { VeskAnnotation } from '@vesk/compiler/src/parser';
 
 let __vskAnnotations: VeskAnnotation[] = [];
@@ -182,6 +182,82 @@ function estreeCallsFetch(ast: ESTreeNode | null): boolean {
     }
   }
   return false;
+}
+
+/**
+ * The simple identifier a member chain *ends* in (`a.b.c` → `c`), or null when
+ * the object doesn't end in a bare name token — mirrors the tokenizer's "name
+ * two tokens before the call paren" rule so `a.b(` and `a?.b(` surface `a`,
+ * `a.b.c(` surfaces `b`, while `this.b(`, `a[0].b(` and `a(x).b(` surface
+ * nothing.
+ */
+function memberReceiverName(obj: unknown): string | null {
+  if (!obj || typeof obj !== 'object') return null;
+  const rec = obj as Record<string, unknown>;
+  if (rec.type === 'Identifier' && typeof rec.name === 'string') return rec.name;
+  const prop = rec.type === 'MemberExpression' && !rec.computed ? rec.property : null;
+  if (prop && typeof prop === 'object' && (prop as Record<string, unknown>).type === 'Identifier') {
+    const propName = (prop as Record<string, unknown>).name;
+    if (typeof propName === 'string') return propName;
+  }
+  return null;
+}
+
+/**
+ * Single-pass ESTree walk collecting every simple call target in `ast` —
+ * identifiers invoked directly (`fn(` / `fn<T>(`, constructor calls included)
+ * and the receiver name of a bare member call (`a.b(` → `a`, `a.b?.c(` → `b`)
+ * — plus every JSX element tag name. Mirrors the semantics of
+ * `collectCalledIdentifiers` over the equivalent text, so one walk of the
+ * already-parsed tree replaces re-tokenizing each IR raw fragment.
+ */
+function collectCallAndJsxTargets(ast: unknown): Set<string> {
+  const targets = new Set<string>();
+  const stack: unknown[] = [ast];
+  while (stack.length > 0) {
+    const candidate = stack.pop();
+    if (!candidate || typeof candidate !== 'object') continue;
+    const node = candidate as Record<string, unknown>;
+    if (typeof node.type === 'string') {
+      if (node.type === 'CallExpression' || node.type === 'NewExpression') {
+        const callee = node.callee;
+        if (callee && typeof callee === 'object') {
+          const c = callee as Record<string, unknown>;
+          if (c.type === 'Identifier' && typeof c.name === 'string' && node.optional !== true) {
+            targets.add(c.name);
+          } else if (c.type === 'MemberExpression' && !c.computed && node.optional !== true) {
+            const receiverName = memberReceiverName(c.object);
+            if (receiverName) targets.add(receiverName);
+          }
+        }
+      } else if (node.type === 'JSXElement') {
+        const opening = node.openingElement;
+        const tag = opening && typeof opening === 'object' ? (opening as Record<string, unknown>).name : null;
+        if (tag && typeof tag === 'object') {
+          const t = tag as Record<string, unknown>;
+          if (t.type === 'JSXIdentifier' && typeof t.name === 'string') {
+            targets.add(t.name);
+          } else if (t.type === 'JSXMemberExpression') {
+            const prop = t.property;
+            if (prop && typeof prop === 'object' && (prop as Record<string, unknown>).type === 'JSXIdentifier') {
+              const propName = (prop as Record<string, unknown>).name;
+              if (typeof propName === 'string') targets.add(propName);
+            }
+          }
+        }
+      }
+      for (const key of Object.keys(node)) {
+        if (key === 'parent' || key === 'loc' || key === 'start' || key === 'end' || key === 'range') continue;
+        const value = node[key];
+        if (Array.isArray(value)) {
+          for (const item of value) stack.push(item);
+        } else {
+          stack.push(value);
+        }
+      }
+    }
+  }
+  return targets;
 }
 
 function componentUsesFetch(nodes: IRNode[]): boolean {
@@ -1417,76 +1493,16 @@ export function generateIR(ast: any, source: string, filename?: string): IRRoot 
     'createResource', 'getAction', 'validateActionInput', 'issuesToFieldMap', 'isFormAction',
     'Show', 'For', 'Switch', 'Match',
   ];
+  // One walk of the already-parsed tree finds every auto-importable call
+  // target and JSX element name. Every IR raw the old per-fragment scan
+  // re-tokenized ("addUsedFrom" over ~15 text slices) is a subtree of this
+  // very same `ast` — nothing is lost, but the acorn tokenizer is invoked once
+  // per file instead of once per fragment.
+  const called = collectCallAndJsxTargets(ast);
   const usedFunctions = new Set<string>();
-  const addUsedFrom = (code: string): void => {
-    const called = collectCalledIdentifiers(code);
-    for (const fn of autoImportable) {
-      if (called.has(fn)) usedFunctions.add(fn);
-    }
-  };
-
-  for (const code of topLevelCode) addUsedFrom(code);
-  for (const code of [loadFn, staticProps]) {
-    if (code) addUsedFrom(code);
+  for (const fn of autoImportable) {
+    if (called.has(fn)) usedFunctions.add(fn);
   }
-
-  function scanForAutoImport(nodes: IRNode[]): void {
-    for (const node of nodes) {
-      if (node instanceof RuntimeStatement && node.raw) {
-        addUsedFrom(node.raw);
-      }
-      if (node instanceof TrackDecl && node.init) {
-        addUsedFrom(node.init);
-      }
-      if (node instanceof ForLoop) {
-        if (node.init) addUsedFrom(node.init);
-        if (node.update) addUsedFrom(node.update);
-        if (node.condition && node.condition.raw) addUsedFrom(node.condition.raw);
-        scanForAutoImport(node.bodyTemplate);
-      }
-      if (node instanceof WhileLoop) {
-        if (node.condition && node.condition.raw) addUsedFrom(node.condition.raw);
-        scanForAutoImport(node.bodyTemplate);
-      }
-      if (node instanceof SwitchBlock) {
-        if (node.discriminant && node.discriminant.raw) addUsedFrom(node.discriminant.raw);
-        for (const c of node.cases) {
-          if (c.test && c.test.raw) addUsedFrom(c.test.raw);
-          scanForAutoImport(c.body);
-        }
-      }
-      if (node instanceof TryCatch) {
-        scanForAutoImport(node.bodyTemplate);
-        scanForAutoImport(node.catchBody);
-      }
-      if (node instanceof ComponentCall) {
-        if (autoImportable.includes(node.componentName)) {
-          usedFunctions.add(node.componentName);
-        }
-        for (const prop of node.props) {
-          if (prop.value && prop.value.raw) {
-            addUsedFrom(prop.value.raw);
-          }
-        }
-        scanForAutoImport(node.children);
-      }
-      if (node instanceof MapRegion) {
-        scanForAutoImport(node.bodyTemplate);
-        scanForAutoImport(node.alternateNodes);
-      }
-      if (node instanceof OpaqueDynamicRegion) {
-        scanForAutoImport(node.consequentNodes);
-        scanForAutoImport(node.alternateNodes);
-      }
-      if (node instanceof DynamicBinding && node.expression && node.expression.raw) {
-        addUsedFrom(node.expression.raw);
-      }
-      if (node instanceof StaticNode || node instanceof ServerBlock || node instanceof ClientBlock || node instanceof HeadBlock) {
-        scanForAutoImport(node.children);
-      }
-    }
-  }
-  scanForAutoImport(components.flatMap(c => c.body));
 
   if (usedFunctions.size > 0) {
     const existing = new Set<string>();
