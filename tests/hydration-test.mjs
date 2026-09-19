@@ -1156,11 +1156,12 @@ async function main() {
   console.log('\n=== TEST 18: SSR data integrity across all routes ===');
   // '/' is a data route: Home demos `useFetch(..., { into })` with the posts
   // resource, so it embeds exactly one ssr-data script like /async and /posts.
-  const DATA_ROUTES = new Set(['/', '/async', '/posts']);
+  const DATA_ROUTES = new Set(['/', '/async', '/posts', '/portal', '/portal/guides']);
   const FULL_ROUTES = [
     '/', '/about', '/blog', '/blog/hello-world', '/async', '/comp-test',
     '/actions', '/posts', '/empty', '/map', '/statements', '/broken',
     '/store', '/store/widget', '/typed',
+    '/portal', '/portal/guides',
   ];
   const SPA_TEXT = {
     '/': 'Welcome to Vesk',
@@ -1178,6 +1179,8 @@ async function main() {
     '/store': 'Store',
     '/store/widget': 'Item: widget',
     '/typed': 'Total likes',
+    '/portal': 'Portal posts',
+    '/portal/guides': 'Guides layout',
   };
 
   {
@@ -1293,7 +1296,7 @@ async function main() {
     // never reference the ssr-data script; data routes must reference it exactly
     // once. Mirrors the reported "script leaks into other pages' view-source".
     console.log('  18d: fresh-document data-script isolation');
-    for (const [route, expected] of [['/', 1], ['/about', 0], ['/async', 1], ['/posts', 1], ['/map', 0]]) {
+    for (const [route, expected] of [['/', 1], ['/about', 0], ['/async', 1], ['/posts', 1], ['/map', 0], ['/portal', 1], ['/portal/guides', 1]]) {
       const page = await browser.newPage();
       await goto(page, BASE + route, { waitUntil: 'networkidle0' });
       const html = await page.content();
@@ -1771,6 +1774,231 @@ async function main() {
       assert(errors.length === 0, 'reload zero pageerrors (got ' + errors.length + ': ' + errors.join(', ') + ')');
     }
     await page.close();
+  }
+
+  // ── Test 24: layout-slot integrity (async layout chain, id-paired boundaries) ──
+  // Regression (layout-slot-contract work): async layout chains rendering
+  // `{props.children}` through nested layouts hydrated by re-rendering the
+  // whole chain — twinning footers, dropping nav, leaving unconsumed markers,
+  // and misordering slot content. Every boundary is now a
+  // `<!--vsk-slot:<id>-->` … `<!--vsk-slot-end:<id>-->` pair that the hydrate
+  // codegen claims in place via `createLayoutSlot`.
+  {
+    console.log('\n=== TEST 24: layout-slot integrity ===');
+
+    // 24a: SSR — every vsk-slot open marker is closed by its exact id, with
+    // perfect LIFO nesting (outer layout opens first, closes last). Ids are a
+    // per-compile counter, so only pairing (never the concrete id) is asserted.
+    console.log('  24a: SSR vsk-slot boundaries pair by id, LIFO-nested');
+    const pairIds = (raw) => {
+      const order = [];
+      const stack = [];
+      const re = /<!--(vsk-slot|vsk-slot-end):(s\d+)-->/g;
+      let m;
+      while ((m = re.exec(raw))) {
+        order.push(m[1] + ':' + m[2]);
+        if (m[1] === 'vsk-slot') stack.push(m[2]);
+        else {
+          const open = stack.pop();
+          if (open !== m[2]) return { order, unbalanced: 'mismatch ' + open + ' vs ' + m[2] };
+        }
+      }
+      return { order, stack, unbalanced: stack.length ? 'unclosed ' + stack.join(',') : null };
+    };
+    for (const [route, expectPairs] of [['/portal', 2], ['/portal/guides', 3]]) {
+      const raw = await (await fetch(BASE + route)).text();
+      const res = pairIds(raw);
+      assert(!res.unbalanced, `${route}: slot markers balance (${res.unbalanced})`);
+      const openCount = (raw.match(/<!--vsk-slot:s\d+-->/g) || []).length;
+      const closeCount = (raw.match(/<!--vsk-slot-end:s\d+-->/g) || []).length;
+      assert(openCount === expectPairs && closeCount === expectPairs,
+        `${route}: exactly ${expectPairs} paired slot boundaries (open ${openCount}, close ${closeCount})`);
+      assert(res.order[0].startsWith('vsk-slot:') && res.order[res.order.length - 1].startsWith('vsk-slot-end:'),
+        `${route}: outer layout opens first and closes last (${res.order[0]} .. ${res.order[res.order.length - 1]})`);
+    }
+
+    // 24b: full load — single nav/main/footer, exact-once content, no markers.
+    console.log('  24b: full load — single nav/main/footer, exact-once content, no markers');
+    {
+      const page = await browser.newPage();
+      const errors = [];
+      page.on('pageerror', err => errors.push(err.message));
+
+      const readPortal = () => page.evaluate(() => {
+        const root = document.getElementById('root');
+        let vsk = 0, hold = 0;
+        const w = document.createTreeWalker(root, NodeFilter.SHOW_COMMENT);
+        while (w.nextNode()) {
+          const t = w.currentNode.textContent || '';
+          if (t === 'vsk') vsk++;
+          else if (t === 'vsk-hold') hold++;
+        }
+        const nav = document.querySelector('.portal-nav');
+        const main = document.querySelector('.portal-main');
+        const footer = document.querySelector('.portal-footer');
+        const body = (root?.textContent || '').replace(/\s+/g, ' ').trim();
+        return {
+          root: !!root,
+          navCount: document.querySelectorAll('.portal-nav').length,
+          mainCount: document.querySelectorAll('.portal-main').length,
+          footerCount: document.querySelectorAll('.portal-footer').length,
+          columns: document.querySelectorAll('.portal-col').length,
+          authorCount: (body + ' ').split('Test Author').length - 1,
+          buildBadges: document.querySelectorAll('.portal-build-badge').length,
+          buildBadgeText: (document.querySelector('.portal-build-badge')?.textContent || '').replace(/\s+/g, ' ').trim(),
+          markers: { vsk, hold },
+          ordered: !!(nav && main && footer &&
+            (nav.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+            (main.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING)),
+          body,
+        };
+      });
+
+      for (const route of ['/portal', '/portal/guides']) {
+        await goto(page, BASE + route, { waitUntil: 'networkidle0', timeout: 15000 });
+        const s = await readPortal();
+        assert(s.root, `${route}: #root survives`);
+        assert(s.navCount === 1 && s.mainCount === 1 && s.footerCount === 1,
+          `${route}: single chrome each (nav ${s.navCount}, main ${s.mainCount}, footer ${s.footerCount})`);
+        assert(s.ordered, `${route}: nav before main before footer in DOM`);
+        assert(s.columns === 3, `${route}: footer renders 3 link columns exactly once (got ${s.columns})`);
+        assert(s.authorCount === 1, `${route}: author line exactly once (got ${s.authorCount})`);
+        assert(s.buildBadges === 1, `${route}: build badge exactly once (got ${s.buildBadges})`);
+        assert(s.buildBadgeText.startsWith('build '), `${route}: async badge hydrated in place ("${s.buildBadgeText}")`);
+        assert(s.markers.vsk === 0 && s.markers.hold === 0,
+          `${route}: all hydration markers claimed (vsk=${s.markers.vsk}, hold=${s.markers.hold})`);
+        assert(s.body.includes(route === '/portal' ? 'Portal posts' : 'Guides layout'),
+          `${route}: renders the right page content`);
+        assert(errors.length === 0, `${route} zero pageerrors (got ${errors.length}: ${errors.join(', ')})`);
+      }
+      await page.close();
+    }
+
+    // 24c: mobile-menu toggle exactly-once — M ⇄ X, no duplicate mobile nav.
+    console.log('  24c: mobile menu toggles exactly-once');
+    {
+      const page = await browser.newPage();
+      const errors = [];
+      page.on('pageerror', err => errors.push(err.message));
+      await goto(page, BASE + '/portal', { waitUntil: 'networkidle0' });
+      await waitForHydration(page);
+
+      const readMenu = () => page.evaluate(() => {
+        const btn = document.querySelector('.portal-menu-btn');
+        const mobileNav = document.querySelector('.portal-mobile-nav');
+        return {
+          label: btn?.getAttribute('aria-label') || null,
+          links: mobileNav ? mobileNav.querySelectorAll('a').length : 0,
+          mobileNavs: document.querySelectorAll('.portal-mobile-nav').length,
+          buttonCount: document.querySelectorAll('.portal-menu-btn').length,
+        };
+      });
+
+      let s = await readMenu();
+      assert(s.buttonCount === 1, 'single menu button (got ' + s.buttonCount + ')');
+      assert(s.label === 'Open menu' && s.mobileNavs === 0, 'initial: closed (aria-label "' + s.label + '")');
+
+      await clickEl(page, '.portal-menu-btn');
+      await new Promise(r => setTimeout(r, 150));
+      s = await readMenu();
+      assert(s.label === 'Close menu' && s.mobileNavs === 1 && s.links === 4,
+        'open: Close menu + single mobile nav with 4 links (got ' + JSON.stringify(s) + ')');
+
+      await clickEl(page, '.portal-menu-btn');
+      await new Promise(r => setTimeout(r, 150));
+      s = await readMenu();
+      assert(s.label === 'Open menu' && s.mobileNavs === 0,
+        'close: back to Open menu, mobile nav removed (got ' + JSON.stringify(s) + ')');
+
+      // Opening again must rebuild exactly one nav (no accumulation).
+      await clickEl(page, '.portal-menu-btn');
+      await new Promise(r => setTimeout(r, 150));
+      s = await readMenu();
+      assert(s.label === 'Close menu' && s.mobileNavs === 1 && s.links === 4,
+        're-open: exactly one mobile nav with 4 links again (got ' + JSON.stringify(s) + ')');
+      assert(errors.length === 0, 'menu toggling zero pageerrors (got ' + errors.length + ')');
+      await page.close();
+    }
+
+    // 24d/24e/24f: SPA nav between nested portals, hard reload, SPA back.
+    console.log('  24d/24e/24f: SPA nav, hard reload, SPA back');
+    {
+      const page = await browser.newPage();
+      const errors = [];
+      page.on('pageerror', err => errors.push(err.message));
+      await goto(page, BASE + '/portal', { waitUntil: 'networkidle0' });
+      await waitForHydration(page);
+
+      const countChrome = () => page.evaluate(() => ({
+        nav: document.querySelectorAll('.portal-nav').length,
+        main: document.querySelectorAll('.portal-main').length,
+        footer: document.querySelectorAll('.portal-footer').length,
+        guides: document.querySelectorAll('.guides-layout').length,
+        path: window.location.pathname,
+      }));
+
+      // 24d: SPA /portal -> /portal/guides — single nested chrome set.
+      await page.evaluate(() => { window.__spaFlag = true; });
+      await page.evaluate(() => { const r = window.__vesk_router; if (r && r.navigate) r.navigate('/portal/guides'); });
+      const t0 = Date.now();
+      let landed = null;
+      while (Date.now() - t0 < 15000) {
+        const s = await countChrome();
+        if (s.path === '/portal/guides' && s.guides === 1) { landed = s; break; }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      assert(!!landed, '24d SPA nav /portal -> /portal/guides lands on the guides page');
+      if (landed) {
+        assert(landed.nav === 1 && landed.main === 1 && landed.footer === 1,
+          '24d single nested chrome after nav (nav ' + landed.nav + ', main ' + landed.main + ', footer ' + landed.footer + ')');
+        assert(landed.guides === 1, '24d exactly one guides layout in the chain (got ' + landed.guides + ')');
+        const text = await page.evaluate(() => document.getElementById('root').textContent.replace(/\s+/g, ' ').trim());
+        assert(text.includes('Guides layout'), '24d guides content rendered in place');
+        if (new Set(text.split('Guides layout')).size > 1) {
+          assert((text + ' ').split('Guides layout').length - 1 === 1, '24d guides layout label exactly once in #root');
+        }
+      }
+      assert(await page.evaluate(() => window.__spaFlag === true), '24d stayed SPA (no reload)');
+
+      // 24e: hard reload on guides — claims the 3-level chain exactly once.
+      await page.reload({ waitUntil: 'networkidle0' });
+      {
+        const s = await countChrome();
+        assert(s.nav === 1 && s.main === 1 && s.footer === 1 && s.guides === 1,
+          '24e reload: single chrome + guides layout (got ' + JSON.stringify(s) + ')');
+        const markers = await page.evaluate(() => {
+          let v = 0, h = 0;
+          const w = document.createTreeWalker(document.getElementById('root'), NodeFilter.SHOW_COMMENT);
+          while (w.nextNode()) {
+            const t = w.currentNode.textContent || '';
+            if (t === 'vsk') v++;
+            else if (t === 'vsk-hold') h++;
+          }
+          return { v, h };
+        });
+        assert(markers.v === 0 && markers.h === 0,
+          '24e reload claims all markers (vsk=' + markers.v + ', hold=' + markers.h + ')');
+      }
+
+      // 24f: SPA back to /portal — fresh slot render, single chrome.
+      await page.evaluate(() => { window.__spaFlag = true; });
+      await page.evaluate(() => { const r = window.__vesk_router; if (r && r.navigate) r.navigate('/portal'); });
+      const t1 = Date.now();
+      let back = null;
+      while (Date.now() - t1 < 15000) {
+        const s = await countChrome();
+        if (s.path === '/portal' && s.guides === 0 && s.nav === 1) { back = s; break; }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      assert(!!back, '24f SPA back lands on /portal with single chrome');
+      if (back) {
+        const text = await page.evaluate(() => document.getElementById('root').textContent.replace(/\s+/g, ' ').trim());
+        assert(text.includes('Portal posts'), '24f back renders the portal list again');
+      }
+      assert(await page.evaluate(() => window.__spaFlag === true), '24f back stayed SPA (no reload)');
+      assert(errors.length === 0, 'layout-slot session zero pageerrors (got ' + errors.length + ': ' + errors.join(', ') + ')');
+      await page.close();
+    }
   }
 
   // ── Results ────────────────────────────────────────
