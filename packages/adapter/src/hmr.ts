@@ -31,6 +31,8 @@ export interface HmrErrorPayload {
   suggestions?: string[];
   nextSteps?: string[];
   stack?: string;
+  /** Optional VeskError-style code (e.g. `V0412`) carried on the thrown error. */
+  code?: string;
 }
 
 /**
@@ -143,6 +145,14 @@ export function buildErrorPayload(
     ? resolve(opts.appDir, file)
     : undefined);
 
+  // VeskError throws carry a stable `.code` (e.g. `V0412`) — surface it in the
+  // payload so the HMR overlay, SSR error page, and diagnostics can show it.
+  const errorCode = parsed && typeof parsed.code === 'string' && parsed.code
+    ? parsed.code
+    : (error as { code?: unknown } | null)?.code
+      ? String((error as { code?: unknown }).code)
+      : undefined;
+
   // The file header already shows the location; strip the redundant
   // " in <file>" suffix compilers append to messages (e.g. acorn's
   // "Unexpected token in /abs/app/page.vsk").
@@ -159,6 +169,7 @@ export function buildErrorPayload(
     column,
     message: cleanMessage,
   };
+  if (errorCode) payload.code = errorCode;
   if (filePath) payload.filePath = filePath;
   if (codeframe) payload.codeframe = codeframe;
   if (tipsData.tips && tipsData.tips.length) payload.tips = tipsData.tips;
