@@ -31,7 +31,7 @@ Sweep of all vesk-doc routes (full reload + 3.5s settle) on `:4000`:
 | `/showcase` | 1 | 44 | **21 mismatch** | ✗ |
 | `/docs` (index) | 1 | **255** | **63 mismatch** | ✗ |
 
-**Critical finding**: All broken routes work correctly **after any SPA navigation** (e.g., `/` → `/docs` SPA nav → `/docs` is clean). The failures **only occur on full reload (SSR→hydrate)**. The client-side rendering after SPA nav has zero leftover markers and zero warns.
+**Critical finding (corrected)**: SPA navigation does NOT fully fix the broken routes — some routes still exhibit issues after SPA nav, and response times are severely degraded (800ms–10s) indicating deeper hydration/re-render problems. The "works after SPA nav" observation was incomplete.
 
 Confirmed on test-app for contrast: dev `:3000` **and** prod `:3100` portal routes are both clean (0 warns, 0 leftover, toggle works). Persistent `if`/`map` comments and `vsk-slot:sN` pairs appear identically on clean test-app too — those are by-design residue, not defects.
 
@@ -45,9 +45,11 @@ Confirmed on test-app for contrast: dev `:3000` **and** prod `:3100` portal rout
 
 Reading `packages/runtime/src/hydrate.ts` (claim walker, typed markers `vsk:t:`/`vsk:c:`, `takeMarkers`, `reportMiss`) and `packages/compiler/src/server-jsgen.ts` (SSR marker emission, SlotNode, mapRegion keyed markers). Broken pages share repeated map-generated `<Link>` cards (`vsk:c:Link` typed markers) — claim appears to exhaust markers early, leaving tail unconsumed. `/compiler` also loses `slot-end` marker silently.
 
+**Performance**: Severely degraded response times (800ms–10s) on broken routes after SPA nav, suggesting excessive re-renders or blocked event loop from leftover marker processing.
+
 **Attempted fix**: Modified `packages/compiler/src/client-codegen.ts` `emitStatic` to retrieve pure static children from `__vsk_ssrEls` instead of calling `nextElement` (since SSR emits no marker for static children of dynamic parents). Client-codegen tests pass (281/281). However, dev server cache not fully cleared — fix not yet live on `:4001`.
 
-Next: fully clear vesk-doc cache (`.vesk`, `node_modules/.cache`, browser), rebuild, restart, verify fix works on full reload.
+Next: fully clear vesk-doc cache (`.vesk`, `node_modules/.cache`, browser), rebuild, restart, verify fix works on full reload. Then investigate why SPA nav doesn't fully resolve the issue and causes severe slowdowns (possible runaway effect re-registration from unclaimed markers).
 
 ## Next Move (this session continues)
 
