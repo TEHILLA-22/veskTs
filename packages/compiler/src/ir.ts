@@ -194,6 +194,38 @@ export class SlotNode {
   constructor() {}
 }
 
+/**
+ * A named content slot threaded to a component through a prop that was given a
+ * JSX element value at the call site (`<Popover trigger={<Button/>}>`). The
+ * prop is neither a scalar value nor JSON-able — it is renderable content, so
+ * codegen hoists the slot body and passes it under the prop name using the
+ * exact same channel as `children` (a serialized string IIFE on the server, a
+ * fresh DocumentFragment on the client). Child components draw it back with
+ * `{props.<name>}`, which compiles to a {@link PropSlotRender}.
+ */
+export class PropSlot {
+  propName: string;
+  body: IRNode[];
+
+  constructor(propName: string, body: IRNode[]) {
+    this.propName = propName;
+    this.body = body;
+  }
+}
+
+/**
+ * A content read of a slot prop (`{props.trigger}`). The runtime value behind
+ * it is threaded through the same channel as `children`, so emitting it on the
+ * server pushes the serialized string and on the client appends the fragment.
+ */
+export class PropSlotRender {
+  propName: string;
+
+  constructor(propName: string) {
+    this.propName = propName;
+  }
+}
+
 export class WhileLoop {
   condition: Expression;
   bodyTemplate: IRNode[];
@@ -314,4 +346,6 @@ export type IRNode =
   | ServerBlock
   | ClientBlock
   | HeadBlock
-  | SlotNode;
+  | SlotNode
+  | PropSlot
+  | PropSlotRender;
