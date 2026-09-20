@@ -61,7 +61,10 @@ export function irNodeToJS(node: IRNode, importedNames?: Set<string> | null, isA
   if (node instanceof StaticNode) return staticNodeToJS(node, isAsync, tracked);
   if (node instanceof TextNode) {
     if (!node.value) return '';
-    return `__out.push(${JSON.stringify(node.value)});`;
+    // The JSX parser entity-decodes text (`&lt;style&gt;` -> `<style>`), so the
+    // decoded value must be re-escaped for HTML text context. Emitting it raw
+    // would turn &lt;` escapes into real start tags and break the parse.
+    return `__out.push(${JSON.stringify(escapeHtml(node.value))});`;
   }
   if (node instanceof DynamicBinding) return dynamicBindingToJS(node, tracked);
   if (node instanceof OpaqueDynamicRegion) return opaqueRegionToJS(node, isAsync, tracked);

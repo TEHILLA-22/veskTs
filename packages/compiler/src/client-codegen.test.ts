@@ -626,6 +626,59 @@ describe('Client Codegen — layout slot scoping & claimed-sibling appends', () 
 		}
 	});
 
+	// A pure-static subtree child of a claimed (dynamic) element is retrieved
+	// from `el.__vsk_ssrEls` and must NOT have its static text re-emitted —
+	// isStaticIR guarantees no dynamic content, so every descendant already
+	// exists in the SSR DOM. Re-creating the fresh text node would duplicate
+	// the heading (the h1 "The compiler is the product." regression):
+	// the fresh node appends AFTER the retained SSR text node.
+	bothModes('pure static subtree child reuses SSR text without duplicating it (expr)', `
+		component P() {
+			let &[v] = track('hi');
+			return <div><h1 class="title">The compiler is the product.</h1><p>{v}</p></div>;
+		}
+	`, (code, mode) => {
+		if (mode === 'hydrate') {
+			expect(code).toContain('__vsk_ssrEls[0]');
+			expect(code).not.toContain('createTextNode("The compiler is the product.")');
+		} else {
+			expect(code).toContain('createTextNode("The compiler is the product.")');
+			expect(code).not.toContain('__vsk_ssrEls');
+		}
+	});
+	bothModes('pure static subtree child reuses SSR text without duplicating it (stmt)', `
+		component P() {
+			let &[v] = track('hi');
+			<div><h1 class="title">The compiler is the product.</h1><p>{v}</p></div>
+		}
+	`, (code, mode) => {
+		if (mode === 'hydrate') {
+			expect(code).toContain('__vsk_ssrEls[0]');
+			expect(code).not.toContain('createTextNode("The compiler is the product.")');
+		} else {
+			expect(code).toContain('createTextNode("The compiler is the product.")');
+			expect(code).not.toContain('__vsk_ssrEls');
+		}
+	});
+
+	// Nested pure static children (a grid with two cells) collapse to residue
+	// refs only — no intermediate text re-creation inside the static subtree.
+	bothModes('nested pure static subtree emits only SSR refs, no inner text (expr)', `
+		component P() {
+			let &[v] = track('hi');
+			return <div><div class="grid"><h1>A</h1><h1>B</h1></div><p>{v}</p></div>;
+		}
+	`, (code, mode) => {
+		if (mode === 'hydrate') {
+			expect(code).toContain('__vsk_ssrEls[0]');
+			expect(code).not.toContain('createTextNode("A")');
+			expect(code).not.toContain('createTextNode("B")');
+		} else {
+			expect(code).toContain('createTextNode("A")');
+			expect(code).toContain('createTextNode("B")');
+		}
+	});
+
 });
 
 describe('Client Codegen — Event Handlers', () => {

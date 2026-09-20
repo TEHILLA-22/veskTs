@@ -136,6 +136,33 @@ describe('Dynamic Expression Rendering', () => {
 		expect(html).toContain('&lt;script&gt;');
 		expect(html).not.toContain('<script>');
 	});
+	it('re-escapes entity-decoded static text (regression: raw &lt;style&gt; broke the document parse)', () => {
+		const html = render(
+			'component App { return <p><code>&lt;style&gt;</code> hoisting</p>; }',
+			'App'
+		);
+		expect(html).toContain('&lt;style&gt;');
+		expect(html).not.toContain('<p><code><style>');
+	});
+	it('re-escapes entity-decoded static text in statement mode', () => {
+		const html = render(`
+			component App {
+				<p>
+					<code>&lt;script&gt;</code> hoisting
+				</p>
+			}
+		`, 'App');
+		expect(html).toContain('&lt;script&gt;');
+		expect(html).not.toContain('<p><code><script>');
+	});
+	it('re-escapes ampersand in static text', () => {
+		const html = render(
+			'component App { return <span>&amp; has no hooks</span>; }',
+			'App'
+		);
+		expect(html).toContain('&amp; has no hooks');
+		expect(html).not.toContain('& has no hooks');
+	});
 	it('renders property access', () => {
 		expect(render(
 			'component App(props: { u: { n: string } }) { return <div>{props.u.n}</div>; }',

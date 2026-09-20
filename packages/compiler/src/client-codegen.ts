@@ -568,22 +568,12 @@ function emitStatic(ctx: Ctx, node: StaticNode, tracked: Map<string, TrackedInfo
           }
         }
       }
-      // Recursively process static children of this static child (they're also in __vsk_ssrEls)
-      let childResidueBefore = 0;
-      for (const gc of child.children) {
-        if (!(gc instanceof DynamicBinding && gc.kind === 'attribute')) {
-          const gcVar = emitNode(ctx, gc, tracked, effectsVar, ssrEl);
-          if (gcVar && ctx.hydrate) {
-            if (gc instanceof TextNode || gc instanceof DynamicBinding) {
-              ctx.push(`if (${gcVar}.parentNode !== ${ssrEl}) { const __ssr = ${ssrEl}.__vsk_ssrEls || []; if (${childResidueBefore} < __ssr.length) ${ssrEl}.insertBefore(${gcVar}, __ssr[${childResidueBefore}]); else ${ssrEl}.appendChild(${gcVar}); }`);
-            } else {
-              ctx.push(`if (${gcVar}.parentNode !== ${ssrEl}) { if (!${ssrEl} || ${gcVar}.parentNode == null || !${ssrEl}.contains(${gcVar})) ${ssrEl}.appendChild(${gcVar}); }`);
-            }
-          }
-          childResidueBefore += ssrResidueEstimate(gc);
-        }
-      }
-      childVar = null; // Already handled inline, don't append again below
+      // The subtree is fully static (isStaticIR), so it carries no dynamic
+      // attributes, events, or text — every descendant is already present in
+      // the SSR element. Re-emitting fresh text nodes here would append
+      // duplicates after the SSR text (the SSR <h1> "compiler is the
+      // product." regression). Keep the element as-is and don't recurse.
+      childVar = ssrEl;
     } else if (singleReactiveText && child instanceof DynamicBinding && child.kind === 'text') {
       childVar = emitDynamicBinding(ctx, child, tracked, effectsVar, `${el}.__vsk_ssrText`);
     } else {
