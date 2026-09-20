@@ -202,7 +202,9 @@ handoff object. On the **client** the injected SSR data settles the resource
 immediately without refetching.
 
 Options in `UseFetchOptions<T>`: `key`, `into` (a tracked cell to write
-into), `staleTime` (client cache TTL), `keepPreviousData`, `retry`,
+into), `staleTime` (client cache TTL), `failureTtl` (server-only negative
+cache TTL in ms for a FAILED fetch by key — default `10000`, `0` disables;
+a flaky upstream can't stall every SSR render while it is down), `keepPreviousData`, `retry`,
 `retryDelay` (GET retries with exponential backoff), `timeout`, `enabled`,
 `dedupe`, plus any `RequestInit` (`method`/`headers`/`credentials`/`cache`/…,
 except `body` which is `unknown` — objects become JSON).

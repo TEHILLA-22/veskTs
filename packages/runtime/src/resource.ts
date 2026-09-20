@@ -23,6 +23,8 @@ export interface UseFetchOptions<T> extends Omit<RequestInit, 'body'> {
 	into?: Tracked<T>;
 	body?: unknown;
 	staleTime?: number;
+	/** Server-only TTL in ms for caching a FAILED fetch per key. Default `10000`. `0` disables. */
+	failureTtl?: number;
 	keepPreviousData?: boolean;
 	retry?: number;
 	retryDelay?: number;
@@ -96,6 +98,33 @@ function getInflight(): Map<string, Promise<unknown>> {
 	const map = new Map<string, Promise<unknown>>();
 	g().__vsk_fetch_inflight = map;
 	return map;
+}
+
+// Cross-request negative cache, keyed by resource `key` exactly like the SSR
+// success store. A FAILED server fetch is recorded here so separate SSR
+// requests (dev hot reloads, or any component sharing the key at any call
+// site) settle from the cached error within the TTL instead of re-hitting a
+// flaky/failing upstream on every render. Successes and explicit
+// refresh()/skipCache clear or bypass it; aborts are never recorded.
+const DEFAULT_FAILURE_TTL = 10_000;
+
+interface FailureEntry {
+	error: unknown;
+	failedAt: number;
+	ttl: number;
+}
+
+function getServerFailureCache(): Map<string, FailureEntry> {
+	const value = g().__vsk_ssr_failure_cache as Map<string, FailureEntry> | undefined;
+	if (value) return value;
+	const map = new Map<string, FailureEntry>();
+	g().__vsk_ssr_failure_cache = map;
+	return map;
+}
+
+function clearFailureCache(key: string): void {
+	if (!isServer()) return;
+	(g().__vsk_ssr_failure_cache as Map<string, FailureEntry> | undefined)?.delete(key);
 }
 
 function getRegistry(): Map<string, Set<ResourceHandle<unknown>>> {
@@ -438,6 +467,22 @@ function startRequest<T>(handle: ResourceHandle<T>, skipCache: boolean): Promise
 	const options = handle.options;
 
 	if (isServer()) {
+		const failureTtl = options.failureTtl ?? DEFAULT_FAILURE_TTL;
+		if (!skipCache && failureTtl > 0) {
+			// Cross-request negative cache: a fetch that failed on an earlier
+			// render is still failing — settle from the recorded error instead of
+			// re-hitting the upstream on every render until the TTL lapses.
+			const failed = getServerFailureCache().get(key);
+			if (failed && failed.ttl > 0 && Date.now() - failed.failedAt < failed.ttl) {
+				getSsrFailures()?.set(key, failed.error);
+				settleError(handle, failed.error);
+				const settled = handle.settled.then(() => {
+					throw failed.error;
+				});
+				settled.catch(() => {});
+				return settled;
+			}
+		}
 		const recorded = !skipCache ? getSsrFailures()?.get(key) : undefined;
 		if (recorded !== undefined) {
 			settleError(handle, recorded);
@@ -460,10 +505,14 @@ function startRequest<T>(handle: ResourceHandle<T>, skipCache: boolean): Promise
 			prom.then(
 				data => {
 					setSsrData(key, data, startToken);
+					clearFailureCache(key);
 					settle(handle, data as T);
 				},
 				error => {
 					getSsrFailures()?.set(key, error);
+					if (isServer() && !isAbortError(error) && failureTtl > 0) {
+						getServerFailureCache().set(key, { error, failedAt: Date.now(), ttl: failureTtl });
+					}
 					settleError(handle, error);
 				},
 			).finally(() => {
@@ -657,7 +706,10 @@ export function createResource<T>(
 		// render is a different channel (per-request sink / per-token slot), so
 		// re-emit the value into the current render — otherwise snapshot() comes
 		// back empty and the page ships without its ssr-data script.
-		if (isServer()) setSsrData(resourceKey, ssrData);
+		if (isServer()) {
+			setSsrData(resourceKey, ssrData);
+			clearFailureCache(resourceKey);
+		}
 		settle(handle, ssrData as T);
 		writeCache(resourceKey, ssrData);
 		return accessor;

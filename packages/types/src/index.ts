@@ -767,6 +767,14 @@ export interface UseFetchOptions<T> extends Omit<RequestInit, 'body'> {
    * (always fetch).
    */
   staleTime?: number;
+  /**
+   * Server-only TTL in ms for caching a FAILED fetch per `key`. While
+   * `Date.now() - failedAt < failureTtl` a failing resource settles with the
+   * cached error instead of re-hitting the upstream on every SSR render —
+   * a flaky API cannot stall every request until it recovers. Default
+   * `10000`; `0` disables. Bypassed by `refresh()`; success clears it.
+   */
+  failureTtl?: number;
   /** Keep the previous `data` visible while `loading` is `true` on refresh. Default `false`. */
   keepPreviousData?: boolean;
   /** Number of retries for `GET` (only) on failure. Default `0`. */

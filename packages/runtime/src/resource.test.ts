@@ -90,6 +90,7 @@ function cleanupGlobals(): void {
   delete (globalThis as any).__vsk_fetch_inflight;
   delete (globalThis as any).__vsk_fetch_registry;
   delete (globalThis as any).__vsk_fetch_cache;
+  delete (globalThis as any).__vsk_ssr_failure_cache;
   delete (globalThis as any).__vesk_ssr_base_url;
   delete (globalThis as any).__vesk_ssr_fetch;
   delete (globalThis as any).__vesk_request;
@@ -559,21 +560,32 @@ it('memoizes failed SSR fetches per render token: re-render passes settle from t
   cleanupGlobals();
 });
 
-it('does not leak recorded SSR failures across render tokens', async () => {
+it('negative-caches a failed SSR fetch across render tokens within the failure TTL, then re-attempts', async () => {
   cleanupGlobals();
   (globalThis as any).__vsk_ssr = true;
   (globalThis as any).__vsk_ssr_token = 'token-a';
   const mock = mockFetch(() => jsonResponse({}, 500));
-  useFetch('/api/token-scoped');
-  await Promise.allSettled((globalThis as any)['__vsk_ssr_promises_token-a']);
+  useFetch('/api/token-scoped', { failureTtl: 60 });
+  await waitFor(() => (globalThis as any).__vsk_ssr_failure_cache?.has('/api/token-scoped') === true);
+  // per-render memo keyed by render token, cross-request cache keyed by resource key
   expect((globalThis as any)['__vsk_ssr_failures_token-a'].get('/api/token-scoped') !== undefined).toBe(true);
-  // next render: fresh token, fresh inflight + failures
+  expect((globalThis as any).__vsk_ssr_failure_cache.has('/api/token-scoped')).toBe(true);
+  // next render: fresh token but WITHIN the failure TTL — the previous failure
+  // settles from the cross-request negative cache; no new fetch
   (globalThis as any).__vsk_ssr_token = 'token-b';
   (globalThis as any)['__vsk_ssr_promises_token-b'] = [];
   const res = useFetch('/api/token-scoped');
-  expect(res.loading).toBe(true);
-  await Promise.allSettled((globalThis as any)['__vsk_ssr_promises_token-b']);
-  await waitFor(() => res.error !== null);
+  expect(res.loading).toBe(false);
+  expect((res.error as HttpError).status).toBe(500);
+  expect(mock.calls.length).toBe(1);
+  // once the TTL lapses a new render re-attempts the real fetch
+  await sleep(80);
+  (globalThis as any).__vsk_ssr_token = 'token-c';
+  (globalThis as any)['__vsk_ssr_promises_token-c'] = [];
+  const res3 = useFetch('/api/token-scoped');
+  expect(res3.loading).toBe(true);
+  await Promise.allSettled((globalThis as any)['__vsk_ssr_promises_token-c']);
+  await waitFor(() => res3.error !== null);
   expect(mock.calls.length).toBe(2);
   mock.restore();
   cleanupGlobals();
@@ -614,6 +626,43 @@ it('refresh() (skipCache) bypasses the recorded SSR failure and re-attempts', as
   await waitFor(() => res.error === null && res.data !== undefined);
   expect(res.data).toEqual({ healed: true });
   expect(attempts).toBe(2);
+  // success clears the cross-request negative cache entry
+  expect((globalThis as any).__vsk_ssr_failure_cache.has('/api/recovers')).toBe(false);
+  mock.restore();
+  cleanupGlobals();
+});
+
+it('failureTtl: 0 disables the cross-request negative cache', async () => {
+  cleanupGlobals();
+  (globalThis as any).__vsk_ssr = true;
+  (globalThis as any).__vsk_ssr_token = 'nt-a';
+  const mock = mockFetch(() => jsonResponse({}, 500));
+  useFetch('/api/nt0', { failureTtl: 0 });
+  await waitFor(() => (globalThis as any)['__vsk_ssr_failures_nt-a']?.get('/api/nt0') !== undefined);
+  expect((globalThis as any).__vsk_ssr_failure_cache).toBe(undefined);
+  (globalThis as any).__vsk_ssr_token = 'nt-b';
+  (globalThis as any)['__vsk_ssr_promises_nt-b'] = [];
+  const res = useFetch('/api/nt0', { failureTtl: 0 });
+  expect(res.loading).toBe(true);
+  await Promise.allSettled((globalThis as any)['__vsk_ssr_promises_nt-b']);
+  await waitFor(() => res.error !== null);
+  expect(mock.calls.length).toBe(2);
+  mock.restore();
+  cleanupGlobals();
+});
+
+it('does not negative-cache aborted SSR requests', async () => {
+  cleanupGlobals();
+  (globalThis as any).__vsk_ssr = true;
+  (globalThis as any).__vsk_ssr_token = 'abort-token';
+  const abortErr = Object.assign(new Error('aborted'), { name: 'AbortError' });
+  const mock = mockFetch(() => Promise.reject(abortErr));
+  const res = useFetch('/api/never-abort', { failureTtl: 60_000 });
+  // aborts clear loading without surfacing an error (abortThrow: false default)
+  await waitFor(() => !res.loading);
+  expect(res.error).toBe(null);
+  // an empty or absent failure cache either way records nothing for aborts
+  expect((globalThis as any).__vsk_ssr_failure_cache?.has('/api/never-abort')).toBe(false);
   mock.restore();
   cleanupGlobals();
 });

@@ -27,7 +27,7 @@ Canonical shapes for `@vesk/runtime/src/resource.ts`:
 
 ```ts
 interface Resource<T> extends PromiseLike<T> { loading: boolean; error: unknown; data: T | undefined; refresh(): void; abort(): void; into?: Tracked<T> }
-interface UseFetchOptions<T> extends RequestInit { key?: string; into?: Tracked<T>; staleTime?: number; retry?: number; timeout?: number; enabled?: boolean; dedupe?: boolean }
+interface UseFetchOptions<T> extends RequestInit { key?: string; into?: Tracked<T>; staleTime?: number; failureTtl?: number; retry?: number; timeout?: number; enabled?: boolean; dedupe?: boolean }
 interface UseFetchStreamOptions extends Omit<UseFetchOptions<string>, 'body'> { into?: Tracked<string>; onChunk?: (chunk: string, total: string) => void }
 ```
 
