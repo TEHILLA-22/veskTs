@@ -17,9 +17,13 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "Vesk Native maps the web motion API to native Compose `Animatable`/`animate*` calls. CSS `animation-*` classes are not supported — the compiler warns and points to `motion.animate()` instead.",
+        text: "An animation is how you tell the user the UI is alive — whether something slid, grew, or faded matters less than that nothing teleported. Native motion keeps the `motion.*` API you already know from the web and compiles it onto Compose's animation engine, so one `.vsk` source animates identically on both platforms. What doesn't carry over is the CSS shortcut: `animation-*` classes have no meaning on a Compose view, so the compiler warns and points you to `motion.animate()` instead.",
       },
       { kind: "h2", text: "motion.animate()" },
+      {
+        kind: "p",
+        text: "The core call takes a ref, a set of target property values, and an options object — the same shape as the web API, compiled to Compose `Animatable`/`animate*` calls underneath:",
+      },
       {
         kind: "tabs",
         tabs: [
@@ -70,13 +74,17 @@ export const pages: { slug: string; title: string; description: string; group: s
       {
         kind: "list",
         items: [
-          "Animate `x`, `y`, `scale`, `rotate`, `opacity`, `width`, `height`, and more.",
+          "Animate `x`, `y`, `scale`, `rotate`, `opacity`, `width`, `height`, and more — the same property names as the web API, so the animation you wrote for the browser is the animation you get on device.",
           "The second argument holds the target property values; the third holds options (`duration`, `ease`, spring properties).",
           "`motion.animate()` returns `MotionControls` — dispatch to `motionAnimateElement` (ref) or `motionAnimateNumber`.",
-          "Per-property in-flight animation jobs are cancelled on new calls — connected interrupts work naturally.",
+          "Per-property in-flight animation jobs are cancelled on new calls — connected interrupts work naturally, so a new call cleanly supersedes the one still running with no manual bookkeeping.",
         ],
       },
       { kind: "h2", text: "MotionRef properties" },
+      {
+        kind: "p",
+        text: "These are the animatable properties on a MotionRef, the same surface the web API exposes, mapped one-to-one:",
+      },
       {
         kind: "table",
         head: ["Property", "Meaning"],
@@ -111,6 +119,10 @@ export const pages: { slug: string; title: string; description: string; group: s
       },
       { kind: "h2", text: "Other motion helpers" },
       {
+        kind: "p",
+        text: "Beyond the core call, the usual motion-utils helpers exist under their same names, so imports you already know keep working in Kotlin:",
+      },
+      {
         kind: "list",
         items: [
           "`motionSpring`, `motionTween`, `motionEase`, `motionCubicBezier`, `motionSteps`, `motionReverseEasing`, `motionMirrorEasing`, `motionDelay` — the animation option constructors.",
@@ -121,6 +133,10 @@ export const pages: { slug: string; title: string; description: string; group: s
         ],
       },
       { kind: "h2", text: "motionInView" },
+      {
+        kind: "p",
+        text: "Reveal-on-scroll needs the element to tell you when it's on screen. `motionInView` resolves when the element enters the viewport; the example flips a tracked cell to swap the class between hidden and revealed:",
+      },
       {
         kind: "tabs",
         tabs: [

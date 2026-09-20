@@ -17,9 +17,13 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "`@vesk/native-compiler` translates `.vsk` files into Kotlin/Compose. It walks the same `@vesk/compiler` IR the web compiler produces, so statement mode, expression mode, tracks, and `{#server}`/`{#client}` all share one source of truth.",
+        text: "`vesk-native` doesn't wrap anything — it compiles. The same `.vsk` source that builds for the web is translated to Kotlin and Compose at build time by `@vesk/native-compiler`, which walks the same `@vesk/compiler` IR the web compiler produces. Statement mode, expression mode, tracks, and `{#server}`/`{#client}` all share one source of truth, and the contract is unforgiving on purpose: whatever can't be translated raises a hard error rather than miscompiling.",
       },
       { kind: "h2", text: "Compiler surface" },
+      {
+        kind: "p",
+        text: "The package's public face is four functions, one per intent — whole-file output, a full result record, errors only, and a standalone JS/TS module:",
+      },
       {
         kind: "table",
         head: ["Function", "Returns"],
@@ -32,10 +36,14 @@ export const pages: { slug: string; title: string; description: string; group: s
       },
       { kind: "h2", text: "CompileOptions" },
       {
+        kind: "p",
+        text: "Options tell the compiler who the file is, what the project already knows about, and which module surfaces to resolve against:",
+      },
+      {
         kind: "list",
         items: [
           "`packageName` — Kotlin package for the emitted file.",
-          "`componentsWithoutProps` / `componentNames` — distinguish real components from unknown tags.",
+          "`componentsWithoutProps` / `componentNames` — distinguish real components from unknown tags; this is how the \"anything capitalized that isn't declared fails\" rule gets enforced.",
           "`customClasses` / `scopedCustomClasses` — Tailwind-class extraction results.",
           "`imageResources` / `mediaResources` — bundled asset maps (see below).",
           "`rootName` / `fileRel` — file identity for generator bookkeeping.",
@@ -47,7 +55,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Targets & portability" },
       {
         kind: "p",
-        text: "A `CompileResult` carries four target collections that drive how the build places the compiled code:",
+        text: "A `CompileResult` carries four target collections that drive how the build places the compiled code and, critically, whether the page can port at all:",
       },
       {
         kind: "list",
@@ -57,10 +65,14 @@ export const pages: { slug: string; title: string; description: string; group: s
           "`jsTsTargets` — project-relative JS/TS module paths.",
           "`npmTargets` — bare npm specifiers.",
           "`multiplatform` library records decide whether an importing page lands in `commonMain` vs `androidMain`.",
-          "A page is portable only when everything it imports is portable too — the target arrays keep that transitive.",
+          "A page is portable only when everything it imports is portable too — the target arrays keep that property transitive. Pull in one Android-only library and the page stops porting, and the compiler knows it from these lists.",
         ],
       },
       { kind: "h2", text: "Asset extraction" },
+      {
+        kind: "p",
+        text: "Assets are discovered on the same IR at compile time, so what you referenced in markup is exactly what gets bundled:",
+      },
       {
         kind: "list",
         items: [
@@ -74,16 +86,16 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Kotlin codegen" },
       {
         kind: "p",
-        text: "The codegen (kotlin-codegen.ts) turns the IR into Compose source:",
+        text: "The codegen (kotlin-codegen.ts) turns the shared IR into Compose source. Every construct maps to something real — or fails loudly trying:",
       },
       {
         kind: "list",
         items: [
           "Each component becomes a `@Composable` function plus a generated props data class.",
           "Tailwind classes become Compose `Modifier` chains and `TextStyle`s via `classify`/`buildModifier`/`buildTextStyle`.",
-          "Tracked state maps to Kotlin: `track(init)` → a cell; `&[]` reads/writes rewrite to `.value` / `.value =`.",
-          "`inferTrackCellType` infers the Kotlin storage type (Int/Double/String) from the init source without regex.",
-          "Buttons lift padding to `contentPadding`; `{#head}` unsupported; `{#server}` → explicit `error(...)`.",
+          "Tracked state maps to Kotlin directly: `track(init)` → a cell; `&[count]` reads/writes rewrite to `.value` / `.value =`.",
+          "`inferTrackCellType` infers the Kotlin storage type (Int/Double/String) from the init source — an AST-based inference, no regex.",
+          "Buttons lift padding to `contentPadding`; `{#head}` unsupported; `{#server}` → explicit `error(...)` rather than a silent miscompile.",
           "CSS animation classes emit a warning pointing to `motion.animate()`.",
           "The only framework components emitted as named calls are Link, NavLink, Outlet, PullToRefresh, SwipeToDismiss, CardStack — anything else capitalized fails the build.",
         ],
@@ -91,7 +103,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "JS/TS module compilation" },
       {
         kind: "p",
-        text: "Project `.ts`/`.js` modules are compiled to Kotlin by `compileProjectModule` (the `npm.ts` pipeline compiles whole app module trees):",
+        text: "Project `.ts`/`.js` modules are compiled to Kotlin too, by `compileProjectModule` (the `npm.ts` pipeline compiles whole app module trees):",
       },
       {
         kind: "list",
@@ -106,12 +118,12 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Compile pipeline" },
       {
         kind: "p",
-        text: "The compiler borrows the web compiler's `parse()` → `generateIR()` and then adds native codegen. The end state is a hand-written, regex-free JS/TS lexer + recursive-descent parser (`lexer.ts`/`parser.ts`) producing its own token stream and AST — the same process, no regex anywhere in parsing.",
+        text: "The compiler borrows the web compiler's `parse()` → `generateIR()` and then adds native codegen on top. At the front sits a hand-written, regex-free JS/TS lexer plus recursive-descent parser (`lexer.ts`/`parser.ts`) producing its own token stream and then its own AST — the same two-phase process as the web compiler, with no regex anywhere in parsing.",
       },
       {
         kind: "note",
         tone: "warn",
-        text: "Errors are hard build failures, never silent miscompiles: constructs the compiler cannot translate yet raise `TODO(...)` and fail the build. Unsupported web constructs warn; untranslatable ones error.",
+        text: "Errors are hard build failures, never silent miscompiles: constructs the compiler cannot translate yet raise `TODO(...)` and fail the build. Unsupported web constructs warn; untranslatable ones error. There is no \"maybe it works\" state in between.",
       },
     ],
   },

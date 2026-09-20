@@ -722,6 +722,8 @@ let finalBody = body;
             const t0 = process.hrtime.bigint();
             const tImport0 = process.hrtime.bigint();
             const mod = await import(`${handlerPath}?t=${ssrVersion}`) as { handle: (req: Request) => Promise<Response> };
+            const _origFetch = globalThis.fetch;
+            globalThis.fetch = function _fetchDebug(u: string | URL | Request, init?: RequestInit) { console.error('FETCH-DEBUG', typeof u === 'string' ? u : String(u), (new Error()).stack); return _origFetch(u, init); };
             const tImport1 = process.hrtime.bigint();
             const webRequest = makeWebRequest(req, url.href, maxBodyBytes);
             const response = await mod.handle(webRequest);
@@ -739,6 +741,7 @@ let finalBody = body;
             res.end(finalBody);
             console.error(`[vdtime] ${url.pathname} ssrVersion=${ssrVersion} total=${Number(tHandle1 - t0) / 1e6 | 0}ms import=${Number(tImport1 - tImport0) / 1e6 | 0}ms handle=${Number(tHandle1 - tImport1) / 1e6 | 0}ms text=${Number(tText1 - tHandle1) / 1e6 | 0}ms`);
           } catch (e) {
+            console.error('[nbsp-debug] DEV-SSR-ERROR', e instanceof Error ? (e.stack || e.message) : String(e));
             res.writeHead(500, { 'Content-Type': 'text/html' });
             res.end(renderSsrErrorPage(e, url.pathname));
           }
@@ -817,44 +820,53 @@ let finalBody = body;
     }
   }
 
-  const srcDir = resolve(appDir, '..', 'src');
+  const projectDir = resolve(appDir, '..');
 
-  try {
-    if (existsSync(srcDir)) {
-      watch(srcDir, { recursive: true }, (_eventType: string, filename: string | null) => {
-        if (!filename) return;
-        if (filename.endsWith('.css')) {
-          doBuild();
-        }
-      });
-    }
-  } catch {
-    // src/ dir not available
-  }
+  // The legacy adapter dev server watches the whole project (not just app/):
+  // every `.vsk`/`.md`, `.css`, config and `.ts`/`.js` file anywhere in the
+  // project is covered by HMR — only node_modules, build outputs and VCS
+  // internals are excluded. `handleFileChange` reboots or reloads per kind;
+  // anything else (non-API helpers, root scripts) falls through to a full
+  // rebuild + reload.
+  const adapterSkipDirs = new Set(['node_modules', '.vesk', 'tarballs', '.git']);
+  const adapterSkipMarkers = ['node_modules/', '.vesk/', 'tmp-vesk-chunk-'];
+  const adapterScriptExts = ['.mts', '.ts', '.tsx', '.mjs', '.js', '.cjs'];
+  const adapterConfigNames = new Set([
+    'vesk.config.ts', 'vesk.config.js', 'vesk.config.mjs', 'vesk.config.mts',
+    'postcss.config.js', 'postcss.config.ts', 'tailwind.config.js', 'tailwind.config.ts',
+    'tsconfig.json', 'package.json',
+  ]);
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingFiles = new Set<string>();
 
   try {
-    watch(appDir, { recursive: true }, (_eventType: string, filename: string | null) => {
+    watch(projectDir, { recursive: true }, (_eventType: string, filename: string | null) => {
       if (!filename) return;
-      if (debounceTimer) clearTimeout(debounceTimer);
+      if (adapterSkipDirs.has(filename.split('/')[0]) || adapterSkipMarkers.some((m) => filename.includes(m))) return;
+      const name = filename.slice(filename.lastIndexOf('/') + 1);
+      const isVsk = filename.endsWith('.vsk') || filename.endsWith('.md') || filename.endsWith('.markdown');
+      const isCss = filename.endsWith('.css');
+      const isScript = adapterScriptExts.some((ext) => filename.endsWith(ext));
+      if (!isVsk && !isCss && !isScript && !adapterConfigNames.has(name)) return;
 
+      if (isCss) {
+        doBuild();
+        return;
+      }
+
+      if (debounceTimer) clearTimeout(debounceTimer);
       pendingFiles.add(filename);
       debounceTimer = setTimeout(() => {
         const files = [...pendingFiles];
         pendingFiles = new Set<string>();
+        if (files.length === 0) return;
 
-        const configFiles = files.filter(f =>
-          f === 'vesk.config.ts' || f === 'vesk.config.js' ||
-          f === 'tsconfig.json' || f === 'package.json' ||
-          f.endsWith('/vesk.config.ts') || f.endsWith('/vesk.config.js') ||
-          f.endsWith('/tsconfig.json') || f.endsWith('/package.json')
-        );
+        const configFiles = files.filter(f => adapterConfigNames.has(f.slice(f.lastIndexOf('/') + 1)));
 
         const apiMiddlewareFiles = files.filter(f =>
           (f.includes('/api/') || f === 'middleware.ts' || f.endsWith('/middleware.ts')) &&
-          (f.endsWith('.ts') || f.endsWith('.js'))
+          adapterScriptExts.some(ext => f.endsWith(ext))
         );
 
         const vskFiles = files.filter(f => f.endsWith('.vsk'));

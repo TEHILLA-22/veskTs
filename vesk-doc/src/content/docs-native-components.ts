@@ -17,7 +17,7 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "Vesk Native ships a small set of framework components that compile to named Compose calls. They are auto-available in any `.vsk` file — no import needed.",
+        text: "Every mobile app ends up hand-rolling the same small set of behaviors: navigating between routes, refreshing a feed, swiping a row away, flipping through a deck of cards, rendering the child of a nested layout. In Vesk Native those are real components rather than something you build by hand, and because the compiler emits them as named Compose calls they run at native speed with no JavaScript layer underneath. They're auto-available in any `.vsk` file — no import needed.",
       },
       {
         kind: "note",
@@ -25,6 +25,10 @@ export const pages: { slug: string; title: string; description: string; group: s
         text: "The complete list of framework components is the `FRAMEWORK_COMPONENT_CALLS` set: `Link`, `NavLink`, `Outlet`, `PullToRefresh`, `SwipeToDismiss`, `CardStack`. Any other capitalized component name is treated as an unknown tag and fails the build.",
       },
       { kind: "h2", text: "Link & NavLink" },
+      {
+        kind: "p",
+        text: "Navigation in a native app is still a route transition. `Link` navigates to a route on tap; `NavLink` is the same call plus an active-state style for the route you're currently on, so nav bars know where the user is without any route-inspection glue.",
+      },
       {
         kind: "tabs",
         tabs: [
@@ -66,15 +70,19 @@ export const pages: { slug: string; title: string; description: string; group: s
           "`<Link href=\"/path\" class=\"...\">` — navigates to the route on tap.",
           "`<NavLink href=\"/path\" class=\"...\">` — same, plus an active style for the current route.",
           "Both take `class` and `modifier` (the `LinkProps` shape: `{ href, class, modifier }`).",
-          "Tap is handled through the runtime `Link` composable; no JavaScript involved.",
+          "Tap is handled through the runtime `Link` composable — no JavaScript involved.",
         ],
       },
       { kind: "h2", text: "Outlet" },
       {
         kind: "p",
-        text: "`<Outlet />` renders the child route inside a nested layout — the native counterpart of `{props.children}` in file-based layouts. Both resolve to the same child-rendering slot.",
+        text: "`<Outlet />` renders the child route inside a nested layout — the native counterpart of `{props.children}` in file-based layouts. Both resolve to the same child-rendering slot, so a layout tree you designed for the web keeps the identical shape in native.",
       },
       { kind: "h2", text: "PullToRefresh" },
+      {
+        kind: "p",
+        text: "A feed is dishonest if it can't be refreshed. `PullToRefresh` wraps content, surfaces the Material3 indicator on the pull gesture, and calls `onRefresh` when the user commits. The refresh state is yours to drive — the component only knows what `isRefreshing` tells it.",
+      },
       {
         kind: "tabs",
         tabs: [
@@ -121,10 +129,14 @@ export const pages: { slug: string; title: string; description: string; group: s
         items: [
           "Pull gesture triggers `onRefresh`; while `isRefreshing` is true the spinner is shown.",
           "Material3 pull-to-refresh indicator with the app's theme colors.",
-          "Wire `isRefreshing` to a tracked cell and reset it in your refresh logic.",
+          "Wire `isRefreshing` to a tracked cell and reset it in your refresh logic — the component reports the gesture, you own the network call and its loading state.",
         ],
       },
       { kind: "h2", text: "SwipeToDismiss" },
+      {
+        kind: "p",
+        text: "The inbox interaction: a horizontal swipe reveals the background and reports that the row should go away. `SwipeToDismiss` gives you the gesture; what the dismissal means — deleting, archiving, undoing — stays in your component.",
+      },
       {
         kind: "tabs",
         tabs: [
@@ -175,10 +187,14 @@ export const pages: { slug: string; title: string; description: string; group: s
         items: [
           "Swipe horizontally to reveal the background and trigger `onDismiss`.",
           "`background` accepts a color string (e.g. `red`) or the default Material3 surface.",
-          "The dismissed state is yours — the component only reports the gesture.",
+          "The dismissed state is yours — the component only reports the gesture. The example flips a tracked cell and lets a guard-clause `if (dismissed)` (or its expression-mode equivalent) drop the row.",
         ],
       },
       { kind: "h2", text: "CardStack" },
+      {
+        kind: "p",
+        text: "A deck of cards for the swipe-through-a-feed interaction — deals, matches, photos. The top card is interactive and swiping it away reveals the next one, with Compose's `CardStack` supplying the gesture and depth handling.",
+      },
       {
         kind: "tabs",
         tabs: [
@@ -237,7 +253,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       {
         kind: "note",
         tone: "warn",
-        text: "Framework components are the ONLY capitalized tags the native compiler understands as built-ins. Custom components are resolved from the declared components in your `.vsk` files or imported `@vesk/<library>` components.",
+        text: "Framework components are the ONLY capitalized tags the native compiler understands as built-ins. Custom components are resolved from the declared components in your `.vsk` files or imported `@vesk/<library>` components — anything else capitalized is an unknown tag and fails the build.",
       },
     ],
   },

@@ -25,17 +25,17 @@ export const pages: DocPage[] = [
     blocks: [
       {
         kind: "p",
-        text: "Vesk exposes server-side APIs for reading the current request, building responses, wiring CORS and webhooks, and hooking the app lifecycle. Everything below lives in `@vesk/runtime/server` and is used in API routes (`app/api/**/route.ts`), middleware, server components and `app/_events.ts`.",
+        text: "Most of a Vesk app never touches the request directly — you write components, they render, the browser gets HTML. But the moment you add a login flow, a checkout, a webhook endpoint, or an API route, you need to read what the browser actually sent and answer with something other than HTML. That is what `@vesk/runtime/server` is for. Everything on this page lives there and is used in API routes (`app/api/**/route.ts`), middleware, server components and the `app/_events.ts` lifecycle file.",
       },
       {
         kind: "note",
         tone: "info",
         text: "The request-context helpers — `useParams`, `useRequest`, `useBody`, `cookies()`, `headers()`, `locals()` — read from an ambient per-request store (`globalThis.__vesk_request`) that the dev server, the adapter and the API-route runner populate before your code runs. Only `useParams` is auto-imported inside component bodies; the other helpers and the response classes must be imported explicitly from `@vesk/runtime/server`.",
       },
-      { kind: "h2", text: "Request context" },
+      { kind: "h2", text: "Reading the request" },
       {
         kind: "p",
-        text: "While a request is being handled, Vesk keeps a small context object in the ambient store. In API routes it is `{ headers, url, method, cookies, locals, _request, params }`; in SSR renders the adapter seeds a `VeskRequest.from(request, { params, locals })` instance. The helpers below read from whichever object is live.",
+        text: "While a request is being handled, Vesk keeps a small context object in the ambient store. In API routes it is `{ headers, url, method, cookies, locals, _request, params }`; in SSR renders the adapter seeds a `VeskRequest.from(request, { params, locals })` instance. The helpers below read from whichever object is live, so the same call works in a component, a middleware and a route handler — you never have to thread the request through your call stack by hand.",
       },
       {
         kind: "list",
@@ -43,12 +43,17 @@ export const pages: DocPage[] = [
           "`useParams(): Record<string, string>` — route parameters. For `/blog/42/hello` it returns `{ id: '42', slug: 'hello' }`. Auto-imported in component bodies.",
           "`useRequest(): RequestContext | null` — the live request context, or `null` outside a request. Carries `url`, `method`, `params`, `cookies`, `locals` and the underlying `_request`.",
           "`useBody(): Promise<unknown>` — the parsed request body: JSON for `content-type: application/json`, an object for `x-www-form-urlencoded`, otherwise text (with a JSON.parse fallback). Cached per request; returns `null` when there is no underlying request and throws if called outside a request context.",
-          "`cookies(): CookieStore` — the current request's cookies.",
-          "`headers(): Record<string, string | Function | undefined>` — the current request's normalized headers.",
+          "`cookies(): CookieStore` — the current request's cookies, read by name or by iterating the jar.",
+          "`headers()` — the normalized header store: `get(name)` and `has(name)` are case-insensitive, `entries()` yields `[name, value]` pairs, and direct reads like `headers().accept` or `headers()['accept-language']` work too. Multi-valued headers come back joined with `', '`.",
           "`locals(): Record<string, unknown>` — per-request data shared between middleware, handlers and renders (empty object outside a request).",
+          "`serverLocals(): Record<string, unknown>` — the process/isolate-wide store shared across every request; what `onStart` seeds here shows up in each request's `locals()`.",
         ],
       },
       { kind: "h2", text: "Reading params and headers in a component" },
+      {
+        kind: "p",
+        text: "Say a component needs to tailor itself to the URL — an item page that greets the user in their preferred language. `useParams()` gives you the route segments (the same values the router matched), and `headers()` lets you peek at request metadata like `Accept-Language` so the server-rendered HTML is already right, no client round trip needed. Every body mode works the same way.",
+      },
       {
         kind: "tabs",
         tabs: [
@@ -87,7 +92,7 @@ component ParamsPage() {
       { kind: "h2", text: "cookies()" },
       {
         kind: "p",
-        text: "`cookies()` returns the current request's cookie jar. It is a Proxy over `Record<string, string>` that also exposes three helper methods — and any cookie can be read directly by property name (`jar.session`). On the client it falls back to `document.cookie`.",
+        text: "Cookies are how the server remembers things a request can't carry — a session id, a theme, an A/B bucket. `cookies()` returns the current request's cookie jar: a Proxy over `Record<string, string>` that also exposes a few helper methods, so any cookie can be read directly by property name (`jar.session`). On the client it falls back to `document.cookie`. Reading is the request side; writing is the response side — you set cookies with `VeskResponse.setCookie()` (or the `setSignedCookie` helper below), never by mutating the jar.",
       },
       {
         kind: "list",
@@ -137,7 +142,7 @@ component Dashboard() {
       { kind: "h2", text: "headers()" },
       {
         kind: "p",
-        text: "`headers()` normalizes the request headers to lowercase names and supports both method and property access — `headers().get('accept')` and `headers()['accept']` are equivalent. Values from multi-valued headers are joined with `', '`.",
+        text: "When you need to branch on user-agent, honor a caching header, or inspect the origin of a request, `headers()` is the low-friction accessor. It normalizes header names to lowercase and supports both method and property access — `headers().get('accept')` and `headers()['accept']` are equivalent. Values from multi-valued headers are joined with `', '`, and reads are case-insensitive so you never have to guess the casing a proxy or platform sent.",
       },
       {
         kind: "list",
@@ -151,7 +156,7 @@ component Dashboard() {
       { kind: "h2", text: "locals()" },
       {
         kind: "p",
-        text: "`locals()` reads the per-request storage that middleware fills with `ctx.set(key, value)`. Values seeded in `onStart` via the server-wide context are also pre-seeded into every request's `locals()`, so boot-time setup is visible to middleware, handlers and renders alike.",
+        text: "`locals()` is the scratch space for one request: middleware fills it with the user or the tenant, API routes read it, the final render consumes it. It is pre-seeded from the server-wide context, so anything your app set at boot in `onStart` (a database handle, a feature flag set) is already on every request's `locals()` before any middleware runs. That turns boot-time setup into something every handler can reach without importing globals.",
       },
       {
         kind: "code",
@@ -201,7 +206,7 @@ component ProfileBanner() {
       { kind: "h2", text: "useRequest() and useBody()" },
       {
         kind: "p",
-        text: "`useRequest()` hands you the raw context; `useBody()` parses the body by `content-type` — `application/json` → object, `x-www-form-urlencoded` → object, anything else → text. Both are for server-side code (components, API routes, actions); `useBody` is cached per request.",
+        text: "`useRequest()` hands you the raw context — the whole picture of the current request in one object, useful when you need several fields at once or want to inspect what's live. `useBody()` parses the body by `content-type` — `application/json` → object, `x-www-form-urlencoded` → object, anything else → text — and caches the result per request, so calling it twice never re-reads the stream. Both are for server-side code (components, API routes, actions).",
       },
       {
         kind: "tabs",
@@ -241,7 +246,7 @@ component RequestInfo() {
       { kind: "h2", text: "Full API route handler" },
       {
         kind: "p",
-        text: "API routes are TypeScript files under `app/api` exporting handlers named after HTTP methods. `useParams`, `useBody`, `useRequest`, `cookies()`, `headers()` and `locals()` all work inside them, next to the `VeskResponse` fluent builder.",
+        text: "A typical route handler pulls in almost every helper at once: params tell you which resource, cookies tell you who's asking, `useBody()` gives you the payload, and `VeskResponse` lets you answer fluently — status, JSON, and a cookie in one expression. API routes are plain TypeScript files under `app/api` exporting handlers named after HTTP methods, so this is all running next to the request objects Node or your platform handed you.",
       },
       {
         kind: "code",
@@ -286,7 +291,7 @@ export async function POST() {
       { kind: "h2", text: "Building responses" },
       {
         kind: "p",
-        text: "Two response classes ship in `@vesk/runtime/server`: `ServerResponse` covers the routing primitives (redirect, rewrite, next), and `VeskResponse` extends it with a fluent builder for JSON, HTML, cookies, caching and security headers. Both extend the standard `Response`.",
+        text: "Two response classes ship in `@vesk/runtime/server`. `ServerResponse` covers the routing primitives — the three ways a handler can hand off: redirect, rewrite, or fall through. `VeskResponse` extends it with a fluent builder for JSON, HTML, cookies, caching and security headers. Both extend the standard `Response`, so anything that expects a `Response` (middleware `next()`, the adapter, your tests) keeps working.",
       },
       {
         kind: "code",
@@ -319,7 +324,7 @@ export async function PUT() {
       { kind: "h2", text: "VeskResponse (fluent)" },
       {
         kind: "p",
-        text: "`VeskResponse` is a Proxy over a `ServerResponse` subclass, so it can be called with or without `new`. Every chainable method returns the same instance. Static constructors: `json`, `redirect`, `rewrite`, `next`, `html` and `stream`. The returned instance also has `text()` / `json()` for reading the body and a `status` getter that reflects `setStatus`. `build()` (also `text()` and `json()`) flushes queued security headers and cookies into real header values.",
+        text: "`VeskResponse` is where you compose a real answer: JSON body, status, a security header, a cookie, a CORS policy — chained in one statement instead of five. It is a Proxy over a `ServerResponse` subclass, so it can be called with or without `new`; every chainable method returns the same instance, and `build()` (or the `text()`/`json()` readers) flushes the queued security headers and cookies into real header values before the response leaves the handler.",
       },
       {
         kind: "code",
@@ -366,7 +371,7 @@ export async function POST(req: VeskRequest) {
       { kind: "h2", text: "VeskRequest" },
       {
         kind: "p",
-        text: "`VeskRequest` extends `ServerRequest` (which extends the standard `Request` and adds `cookies`, `params` and `locals` stores). It adds request metadata accessors plus security setters. Construct it directly, or wrap an inbound platform `Request` with `VeskRequest.from()` to seed `params`/`locals` for renders.",
+        text: "`VeskRequest` is the incoming half: it extends `ServerRequest` (which extends the standard `Request` and adds `cookies`, `params` and `locals` stores) and layers on request metadata accessors plus security setters. Construct it directly, or wrap an inbound platform `Request` with `VeskRequest.from()` to seed `params`/`locals` for renders — the adapter lives on this path, so the metadata below is exactly what your route handlers and components can rely on.",
       },
       {
         kind: "table",
@@ -388,7 +393,7 @@ export async function POST(req: VeskRequest) {
           ["`static from(request, { params?, locals? })`", "Wraps a platform `Request` (same method + headers, cookies parsed) with seeded params/locals."],
           ["`setCsp(policy | false)`", "Records a CSP override applied to the response via `applyRequestSecurity`."],
           ["`setCsrf(enable)`", "Records the CSRF flag override."],
-          ["`setRateLimit({ windowMs?, max? } | false)`", "Records a rate-limit override."],
+          ["`setRateLimit({ windowMs?, max? } | false)`", "Records a rate-limit override applied to the request when the response is built."],
           ["`setSecurityHeader(name, value | false)`", "Records a custom header override."],
           ["`setTrustProxy(enable | string)`", "Enables trusting `x-forwarded-*` headers for `ip`, `protocol` and `host`."],
           ["`getSecurityOverrides()`", "Returns the recorded `_security` overrides object."],
@@ -417,7 +422,7 @@ export async function GET(req: VeskRequest) {
       { kind: "h2", text: "Security helpers" },
       {
         kind: "p",
-        text: "`withValidation(request, schema, { jsonOnly? })` parses the body (JSON, form data, or text) and runs `schema.safeParse(data)`. On failure it returns a `ServerResponse.json` 400 with `{ error, issues: [{ path, message }] }`; on success it returns `result.data`. `applyRequestSecurity(request, response)` pushes CSP / custom-header overrides recorded on a `VeskRequest` onto the response.",
+        text: "Two helpers make per-route hardening routine. `withValidation(request, schema, { jsonOnly? })` parses the body (JSON, form data, or text) and runs `schema.safeParse(data)` — on failure it returns a tidy `ServerResponse.json` 400 with `{ error, issues: [{ path, message }] }`, on success it returns `result.data`. `applyRequestSecurity(request, response)` pushes the CSP / custom-header / rate-limit overrides recorded on a `VeskRequest` onto the response, so a busy endpoint can opt into a stricter posture without global config changes.",
       },
       {
         kind: "code",
@@ -446,6 +451,7 @@ export async function POST(request: Request) {
 
 export async function GET(req: VeskRequest) {
   req.setCsp("default-src 'self'");
+  req.setRateLimit({ windowMs: 60_000, max: 100 });
   req.setSecurityHeader('X-Custom', 'yes');
   const res = VeskResponse.json({ ok: true });
   applyRequestSecurity(req, res);
@@ -460,6 +466,7 @@ export async function wrap(platformRequest: Request, db: unknown) {
   });
   vreq.setTrustProxy(true);
   vreq.setCsrf(true);
+  // Per-route rate limit: at most 100 requests per 60s window for this handler
   vreq.setRateLimit({ windowMs: 60_000, max: 100 });
   return vreq.getSecurityOverrides();
 }`,
@@ -467,7 +474,7 @@ export async function wrap(platformRequest: Request, db: unknown) {
       { kind: "h2", text: "Signed cookies" },
       {
         kind: "p",
-        text: "Vesk signs cookies with HMAC-SHA256 (Web Crypto) using a per-host secret, producing `value.base64url-signature` over the `name=value` payload. Tampered cookies unsign to `null`. All four helpers are async; `signCookie`/`setSignedCookie`/`readSignedCookie`/`unsignCookie` require the compiler package to be present, which the built runtime bundles.",
+        text: "A plain cookie is just a string — anyone can forge `session=alice` if they know the format. Signed cookies give you tamper evidence: Vesk signs cookies with HMAC-SHA256 (Web Crypto, using a per-host secret) producing `value.base64url-signature` over the `name=value` payload. Tampered cookies unsign to `null`, which is exactly what you want when the alternative is trusting attacker input in an auth check. All four helpers are async; the built runtime bundles what they need.",
       },
       {
         kind: "list",
@@ -503,7 +510,7 @@ export async function POST(request: Request) {
       { kind: "h2", text: "CORS" },
       {
         kind: "p",
-        text: "`cors(options)` returns a middleware function you can call from an `OPTIONS` handler and use to decorate normal responses: an `OPTIONS` request gets a `204` with the `Access-Control-*` headers; any other request sets those headers as `_pending` so `applyCors(response)` can stamp them onto the final response.",
+        text: "If an API route is called from a browser on a different origin, CORS isn't optional — the browser simply blocks the cross-origin read unless you answer the preflight. `cors(options)` returns a middleware function you can call straight from an `OPTIONS` handler: a preflight gets a `204` with the `Access-Control-*` headers, and any other request records those headers as `_pending` so `applyCors(response)` can stamp them onto the final response. For most apps one shared config plus `applyCors` on each answer is all the wiring you need.",
       },
       {
         kind: "list",
@@ -539,7 +546,7 @@ export async function GET(request: Request) {
       { kind: "h2", text: "Webhooks" },
       {
         kind: "p",
-        text: "`webhook({ secret, handler, headerName?, signaturePrefix? })` returns a request handler that verifies a SHA-256 HMAC signature before running your `handler(event, request)`. The signature is compared in constant time (length then char-by-char). A missing or invalid signature responds `401` with `{ error }`. Requires Web Crypto, and `handler` must return a `Response`.",
+        text: "A webhook is a third party calling your server — Stripe, GitHub, a payment gateway. Because you didn't initiate the request, the only thing proving it's real is a signature the sender computed over the body with a shared secret. `webhook({ secret, handler, headerName?, signaturePrefix? })` returns a request handler that verifies a SHA-256 HMAC signature before running your `handler(event, request)`. The verifier needs Web Crypto, the signature is compared in constant time (length, then char-by-char, so timing can't leak the key), and a missing or invalid signature responds `401` with `{ error }` instead of touching your handler. `event` is the parsed JSON body (the raw body text when it isn't JSON), and `handler` must return a `Response`.",
       },
       {
         kind: "list",
@@ -567,7 +574,7 @@ export const POST = webhook({
       { kind: "h2", text: "Hooks (defineHook / removeHook / runHooks)" },
       {
         kind: "p",
-        text: "`defineHook(name, fn)` registers a hook in a process-wide registry; `removeHook(name, fn)` unregisters it; `runHooks(name, ...args)` runs the registered hooks serially and short-circuits with the first `Response` a hook returns (otherwise `undefined`). The API-route runner already invokes live `beforeRequest` / `afterRequest` / `onError` hooks — the primitives are also useful for your own middleware-style logic.",
+        text: "When several routes share a gate — the same role check, the same audit log — you can write it once as a hook instead of copying the guard into every handler. `defineHook(name, fn)` registers a hook in a process-wide registry; `removeHook(name, fn)` unregisters it; `runHooks(name, ...args)` runs registered hooks serially and short-circuits with the first `Response` a hook returns (otherwise `undefined`). The API-route runner already invokes live `beforeRequest` / `afterRequest` / `onError` hooks, and the same primitives work for your own middleware-style logic.",
       },
       {
         kind: "code",
@@ -607,7 +614,7 @@ export async function GET() {
       { kind: "h2", text: "Server events (app/_events.ts)" },
       {
         kind: "p",
-        text: "`app/_events.ts` (or `.js`) is the private convention file for lifecycle handlers. The `_` prefix means it is never routed. Values `set()` in `onStart` land in the server-wide context (`serverLocals()` / `getServerContext`) and are pre-seeded into every request's `locals()`.",
+        text: "Every long-running process needs a moment to open connections and a moment to close them. `app/_events.ts` (or `.js`) is the private convention file for those lifecycle handlers. The `_` prefix means it is never routed — it can't become a URL, it is pure lifecycle. `onStart` boots once, `onRequest` runs for every request, `onStop` cleans up on shutdown. Values `set()` in `onStart` land in the server-wide context (`serverLocals()` / `getServerContext`) and are pre-seeded into every request's `locals()`, which is how a database handle opened once becomes visible to every handler without a global.",
       },
       {
         kind: "list",
@@ -641,7 +648,7 @@ export async function onStop(ctx: ServerEventContext) {
       },
       {
         kind: "p",
-        text: "`ctx.set`/`ctx.get` mirror the explicit server-wide context functions from `@vesk/runtime/server`:",
+        text: "`ctx.set`/`ctx.get` mirror the explicit server-wide context functions from `@vesk/runtime/server`, which are the same store the events file writes to:",
       },
       {
         kind: "list",

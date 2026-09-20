@@ -163,6 +163,19 @@ function isComponentExport(node: CompiledNode): boolean {
 }
 
 /**
+ * Top-level statements an HMR eval snippet must never carry: imports,
+ * re-exports and the registry preamble (`const __components = …`,
+ * `const __hydrators = …`) plus the `__cleanup` / `__place` helpers. The
+ * eval runs against a live chunk scope where those already exist.
+ */
+export function isSnippetDrop(node: CompiledNode): boolean {
+  if (isAnyImport(node) || isComponentExport(node) || isRuntimePreamble(node)) return true;
+  return node.type === 'VariableDeclaration'
+    && (node.declarations?.[0]?.id?.name === '__components'
+      || node.declarations?.[0]?.id?.name === '__hydrators');
+}
+
+/**
  * Extracts matched top-level statements from a compiled client module using
  * the parser's exact `start`/`end` offsets — the complement of
  * `removeCompiledNodes`. AST-only, like everything else in this file.
@@ -202,7 +215,7 @@ function isModuleLevel(node: CompiledNode): boolean {
  * binding is all cross-file references need (components resolve through the
  * `__components` / `__hydrators` registries). Offset-based on the parser AST.
  */
-function demoteExports(code: string): string {
+export function demoteExports(code: string): string {
   let ast: unknown;
   try {
     ast = parse(code);
@@ -432,6 +445,52 @@ function scopeFileContribution(code: string): string {
 }
 
 /**
+ * Single-parse composition of `demoteExports(removeCompiledNodes(code,
+ * isSnippetDrop))`: drop matches and demote surviving exports in ONE acorn
+ * pass over the original offsets. The two operations never overlap (dropped
+ * statements are imports/preamble/component-re-exports; demoted ones are
+ * other export declarations), so composing their edits yields byte-identical
+ * output — at roughly half the parse cost of the two-pass chain the HMR
+ * hot path used to run on every edit.
+ */
+export function stripAndDemoteInOnePass(code: string): string {
+  let ast: unknown;
+  try {
+    ast = parse(code);
+  } catch {
+    return code;
+  }
+  const body = (ast as { body?: Array<unknown> }).body ?? [];
+  type Edit = { start: number; end: number; text?: string };
+  const edits: Edit[] = [];
+  for (const raw of body) {
+    const node = raw as CompiledNode & { declaration?: CompiledNode & { start?: number; end?: number } };
+    if (typeof node.start !== 'number' || typeof node.end !== 'number') continue;
+    const isExport = node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration';
+    if (isSnippetDrop(node)) {
+      let cut = node.end;
+      if (code[cut] === ';') cut++;
+      if (code.startsWith('\r\n', cut)) cut += 2;
+      else if (code[cut] === '\n' || code[cut] === '\r') cut++;
+      edits.push({ start: node.start, end: cut });
+    } else if (isExport && node.type === 'ExportNamedDeclaration' && node.declaration
+      && typeof node.declaration.start === 'number' && typeof node.declaration.end === 'number') {
+      edits.push({ start: node.start, end: node.end, text: code.slice(node.declaration.start, node.declaration.end) });
+    } else if (isExport) {
+      let cut = node.end;
+      if (code[cut] === ';') cut++;
+      edits.push({ start: node.start, end: cut });
+    }
+  }
+  if (edits.length === 0) return code;
+  edits.sort((a, b) => b.start - a.start);
+  for (const e of edits) {
+    code = code.slice(0, e.start) + (e.text ?? '') + code.slice(e.end);
+  }
+  return code;
+}
+
+/**
  * Builds the eval-safe HMR update snippet for one compiled file: drops
  * imports, re-exports and the registry preamble (`const __components = …`,
  * `const __hydrators = …`), demotes remaining value exports, and wraps the
@@ -443,15 +502,13 @@ function scopeFileContribution(code: string): string {
  * scope, an updated component renders against missing bindings and the
  * swap fails with a ReferenceError that surfaces nowhere the tests assert
  * (no reload, stale DOM, zero page errors).
+ *
+ * Single-parse strip+demote (see `stripAndDemoteInOnePass`) — this sits on
+ * the dev-server's per-edit hot path, where the old two-pass chain cost a
+ * second full acorn parse on every file save.
  */
 export function buildHmrEvalSnippet(code: string): string {
-  const isSnippetDrop = (node: CompiledNode): boolean => {
-    if (isAnyImport(node) || isComponentExport(node) || isRuntimePreamble(node)) return true;
-    return node.type === 'VariableDeclaration'
-      && (node.declarations?.[0]?.id?.name === '__components'
-        || node.declarations?.[0]?.id?.name === '__hydrators');
-  };
-  const body = demoteExports(removeCompiledNodes(code, isSnippetDrop)).trim();
+  const body = stripAndDemoteInOnePass(code).trim();
   if (!body) return '';
   const scoped = `{\n${body}\n}`;
   // Never trade a potential duplicate-binding error for a certain syntax
@@ -471,7 +528,7 @@ export function buildHmrEvalSnippet(code: string): string {
  * If the module cannot be parsed it is returned untouched (the compiler's own
  * output is always valid ESM, so that branch is unreachable in practice).
  */
-function removeCompiledNodes(code: string, isTarget: (node: CompiledNode) => boolean): string {
+export function removeCompiledNodes(code: string, isTarget: (node: CompiledNode) => boolean): string {
   let ast: unknown;
   try {
     ast = parse(code);

@@ -1,5 +1,5 @@
 import { readFileSync, watch, statSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
-import { resolve, extname, join } from 'node:path';
+import { resolve, extname, join, dirname } from 'node:path';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { WebSocketServer } from 'ws';
@@ -7,11 +7,12 @@ import type { Server } from 'node:http';
 import { stripCodeTypes } from '@vesk/compiler/src/strip-ts';
 import { renderPage, renderFullPage, renderPageStream, buildDataScripts, securityHeaders, corsHeaders, corsPreflight, createRateLimiter, applyTrustProxy, prettifyHtml, resolveComponentName, getClientProtocol, randomToken, DEFAULT_MAX_BODY_BYTES, applyHeadInjects, applyHtmlPlugins } from '@vesk/compiler/src/server-codegen';
 import { withSsrStore, ssrSink } from '@vesk/compiler/src/ssr-store';
-import { compileClient } from '@vesk/compiler/src/client-codegen';
+import { compileClient, compileClientBoth } from '@vesk/compiler/src/client-codegen';
 import { scanRoutes, matchUrl, collectSources, scanComponents } from '@vesk/compiler/src/router';
 import { scanApiRoutes, matchApiUrl, buildWebRequest, executeApiRoute } from '@vesk/compiler/src/api-routes';
 import { collectMiddlewareChain, executeMiddlewareChain } from '@vesk/compiler/src/middleware';
 import { collectEventsFile, loadEvents, runEventHandlers } from '@vesk/compiler/src/events';
+import { inlineMdContentAttrs, guessProjectRoots } from '@vesk/compiler/src/md-inline';
 import { generateClientBundle, buildTreeShakenRuntime, runtimeExportNames, buildHmrEvalSnippet } from '@vesk/adapter/src/client-bundle';
 import { resolveWithin, isAllowedWsUpgrade, installMdReadHook } from '@vesk/adapter/src/paths';
 import { createDevApiRouter } from '@vesk/adapter/src/dev-api';
@@ -485,6 +486,54 @@ const ssrDataStore = new Map<string, SsrDataPayload>();
 // editor multi-write bursts (write + chmod, atomic-save renames).
 const HMR_DEBOUNCE_MS = 12;
 
+// Routers whose file name (not content) defines the route tree. A content-only
+// edit of any other `.vsk`/`.md` never changes routing, so the dev watcher can
+// skip the full disk rescan and hot-swap straight from the edited file.
+export const ROUTE_STRUCTURAL_VSK = new Set([
+  'page.vsk', 'layout.vsk', 'loading.vsk', 'error.vsk', 'not-found.vsk', 'offline.vsk', 'network.vsk',
+]);
+
+const HMR_SKIP_DIRS = new Set(['node_modules', '.vesk', 'tarballs', '.git']);
+const HMR_SKIP_MARKERS = ['node_modules/', '.vesk/', 'tmp-vesk-chunk-'];
+const HMR_SCRIPT_EXTS = ['.mts', '.ts', '.tsx', '.mjs', '.js', '.cjs'];
+const HMR_CONFIG_NAMES = new Set([
+  'vesk.config.ts', 'vesk.config.js', 'vesk.config.mjs', 'vesk.config.mts',
+  'postcss.config.js', 'postcss.config.ts', 'tailwind.config.js', 'tailwind.config.ts',
+  'tsconfig.json', 'package.json',
+]);
+
+export type HmrWatchKind = 'vsk' | 'css' | 'script' | 'events' | 'config' | 'ignored';
+
+/**
+ * Classifies a watch-relative path into the HMR pipeline it belongs to. The
+ * dev watcher serves every `.ts`/`.js`/`.vsk`/`.css`/config file in a vesk
+ * project regardless of location — only `node_modules`, build outputs and VCS
+ * internals are excluded.
+ */
+export function classifyHmrWatchPath(relPath: string): HmrWatchKind {
+  const first = relPath.split('/')[0];
+  if (HMR_SKIP_DIRS.has(first) || HMR_SKIP_MARKERS.some((m) => relPath.includes(m))) return 'ignored';
+  const name = relPath.slice(relPath.lastIndexOf('/') + 1);
+  if (relPath.endsWith('.vsk') || relPath.endsWith('.md') || relPath.endsWith('.markdown')) return 'vsk';
+  if (relPath.endsWith('.css')) return 'css';
+  if (name === '_events.ts' || name === '_events.js') return 'events';
+  if (HMR_CONFIG_NAMES.has(name)) return 'config';
+  if (HMR_SCRIPT_EXTS.some((ext) => relPath.endsWith(ext))) return 'script';
+  return 'ignored';
+}
+
+/**
+ * Decides whether a watched change forces the full route-tree disk rescan.
+ * Creates/deletes (rename) can restructure routes anywhere; content-only
+ * edits can only restructure routes when the file name itself is a route
+ * marker (page/layout/loading/error/not-found/offline/network.vsk).
+ */
+export function shouldRescanRoutes(relPath: string, eventType: string): boolean {
+  if (eventType === 'rename') return true;
+  const name = relPath.slice(relPath.lastIndexOf('/') + 1);
+  return relPath.endsWith('.vsk') && ROUTE_STRUCTURAL_VSK.has(name);
+}
+
 function storeDataScript(payload: SsrDataPayload): string | null {
   if (!payload.props && !payload.ssrData) return null;
   if (ssrDataStore.size >= 100) {
@@ -921,54 +970,115 @@ export async function startDevServer(port: number, projectDir: string, config: R
   }
 
   const apiWatchCache = new Map<string, number>();
+  // Last seen file content per watch path: identical rewrites (touch,
+  // in-place formatter runs, atomic-save doubles) skip the pipeline entirely.
+  const lastSeenContent = new Map<string, string | null>();
+  // Serialized background chunk rebuilds. The in-memory chunk map must never
+  // regress to an older edit while a newer one is still queued, so refreshes
+  // chain onto one promise. The eval snippet is compiled synchronously on the
+  // hot path; esbuild chunk re-creation is paid in the background between
+  // edits so the update broadcast never waits on the bundler.
+  let chunkRefresh: Promise<void> = Promise.resolve();
+  const queueClientChunksRefresh = (fullPath: string, filename: string, fileExists: boolean): void => {
+    chunkRefresh = chunkRefresh.then(async () => {
+      try {
+        const hot = await buildClientChunks(fullPath);
+        if (hot.err) {
+          const payload = buildDevErrorPayload({
+            err: hot.err,
+            errorMessage: hot.err.message,
+            filename,
+            fullPath,
+            appDir: appDirPath,
+            fileExists,
+          });
+          const displayFile = payload.file || filename || '';
+          LOG.err(`[vsk:error] ${displayFile}${payload.line ? `:${payload.line}:${payload.column || 1}` : ''} — ${payload.message}`);
+          devLastError = payload;
+          recordDiagnostic({
+            severity: 'error',
+            code: 'HMR_CHUNK',
+            file: displayFile || null,
+            line: payload.line,
+            column: payload.column,
+            message: payload.message,
+            hint: (payload.tips && payload.tips[0]) || null,
+          });
+          const broadcast = (globalThis as Record<string, unknown>).__vesk_broadcastHmr as (msg: Record<string, unknown>) => void;
+          if (typeof broadcast === 'function') broadcast({ type: 'error', ...payload });
+        }
+      } catch (e) {
+        LOG.err(`chunk refresh error:`, (e as Error).message);
+      }
+    });
+  };
+
   try {
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     let cssDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-    const skipDirs = new Set(['node_modules', '.vesk', 'tarballs']);
     const watchDir = projectDir;
     watch(watchDir, { recursive: true }, (eventType, filename) => {
         if (!filename) return;
-        if (skipDirs.has(filename.split('/')[0]) || filename.includes('node_modules/') || filename.includes('.vesk/') || filename.includes('tmp-vesk-chunk-')) return;
-        const isVsk = filename.endsWith('.vsk') || filename.endsWith('.md') || filename.endsWith('.markdown');
-        const isCss = filename.endsWith('.css');
-        const isApiRoute = filename.endsWith('.ts') || filename.endsWith('.js') || filename.endsWith('.tsx');
-        const isEvents = filename === '_events.ts' || filename === '_events.js';
-        if (!isVsk && !isCss && !isApiRoute && !isEvents) return;
+        const kind = classifyHmrWatchPath(filename);
+        if (kind === 'ignored') return;
 
         const fullPath = filename.startsWith('/') ? filename : join(watchDir, filename);
         const fileExists = existsSync(fullPath);
+        const bcast = (msg: Record<string, unknown>): void => {
+          const f = (globalThis as Record<string, unknown>).__vesk_broadcastHmr;
+          if (typeof f === 'function') (f as (m: Record<string, unknown>) => void)(msg);
+        };
 
-        if (isEvents) {
+        if (kind === 'events') {
           if (debounceTimer) clearTimeout(debounceTimer);
           debounceTimer = setTimeout(async () => {
             try {
               await runAppStop(false);
               await reloadAppEvents();
               await runAppStart(false);
-              const bcast = (globalThis as Record<string, unknown>).__vesk_broadcastHmr as (msg: Record<string, unknown>) => void;
-              if (typeof bcast === 'function') bcast({ type: 'reload' });
+              const bcastLocal = (globalThis as Record<string, unknown>).__vesk_broadcastHmr as (msg: Record<string, unknown>) => void;
+              if (typeof bcastLocal === 'function') bcastLocal({ type: 'reload' });
               LOG.info(`events reloaded (${filename})`);
             } catch (e) {
               LOG.err(`events reload error: ${(e as Error).message}`);
             }
           }, HMR_DEBOUNCE_MS);
-        } else if (isVsk) {
+        } else if (kind === 'vsk') {
           if (debounceTimer) clearTimeout(debounceTimer);
           debounceTimer = setTimeout(async () => {
             const t0 = Date.now();
             try {
+              // Identical-content rewrites (touch, in-place formatters, atomic
+              // save doubles) change nothing — skip the compile, build and
+              // broadcast entirely. `rename` is never skipped so the route tree
+              // stays consistent after create/delete/move.
+              const current = fileExists ? readFileSync(fullPath, 'utf-8') : null;
+              if (eventType !== 'rename' && current !== null && lastSeenContent.get(fullPath) === current) {
+                LOG.info(`skipped unchanged (${filename})`);
+                return;
+              }
+              lastSeenContent.set(fullPath, current);
+
               if (typeof (globalThis as Record<string, unknown>).__vesk_broadcastHmr === 'function') {
                 ((globalThis as Record<string, unknown>).__vesk_broadcastHmr as (msg: Record<string, unknown>) => void)({ type: 'compiling' });
               }
 
               const stripAnnots = (t: unknown): string =>
                 JSON.stringify(t, (k, v) => (k === 'chunk' || k === 'chunkError') ? undefined : v);
+              // Only structural changes (route-marker files or any create/
+              // delete) force the full disk rescan; a content-only component
+              // or MD edit is hot-swapped straight off the edited file,
+              // skipping the 15-60ms scanRoutes walk entirely.
+              const needsRescan = shouldRescanRoutes(filename, eventType);
               const prevTree = stripAnnots(routeTree);
-              routeTree = scanRoutes(appDirPath);
-              updateSourceMapping();
+              if (needsRescan) {
+                routeTree = scanRoutes(appDirPath);
+                updateSourceMapping();
+              }
               const changedComponents = sourceToComponents.get(fullPath) || [];
-              const treeChanged = prevTree !== stripAnnots(routeTree);
+              const treeChanged = needsRescan && prevTree !== stripAnnots(routeTree);
               const isOutsideApp = !fullPath.startsWith(appDirPath + '/') && fullPath !== appDirPath;
+              const fileDeleted = eventType === 'rename' && !fileExists;
 
               // CSS rescan runs concurrently with the JS build (a .vsk edit
               // cannot change src/global.css) so the hot-swap broadcast is
@@ -979,14 +1089,25 @@ export async function startDevServer(port: number, projectDir: string, config: R
               let hotEditedSource: string | null = null;
               let hotActualName: string | null = null;
               try {
-                if (treeChanged || isOutsideApp) {
+                if (treeChanged || isOutsideApp || fileDeleted) {
                   await buildClientBundle();
                   await bundleRuntime();
-                } else {
-                  const hot = await buildClientChunks(fullPath);
-                  bundleError = hot.err;
-                  hotEditedSource = hot.editedSource;
-                  hotActualName = hot.actualName;
+                } else if (fileExists && current !== null) {
+                  // Fast path: compile the edited file directly (one shared
+                  // acorn+TS parse, comp-only — hydration is refreshed by the
+                  // background chunk pass) and build the eval snippet here.
+                  // The synchronous esbuild chunk rebuild is deferred so the
+                  // update broadcast is never queued behind the bundler.
+                  // Inline markdown content attributes (e.g. `content="../x.md"`) so
+                  // the compiled component reflects the file's dynamic imports,
+                  // matching the path used by `buildClientChunks`.
+                  let source = current;
+                  if (/content=["'][^"']*\.md["']/i.test(source)) {
+                    source = inlineMdContentAttrs(source, dirname(fullPath), guessProjectRoots(appDirPath));
+                  }
+                  const { comp, name } = compileClientBoth(source, null, fullPath, { skipHyd: true });
+                  hotEditedSource = buildHmrEvalSnippet(comp);
+                  hotActualName = name;
                 }
               } catch (e) {
                 bundleError = e as Error;
@@ -999,9 +1120,8 @@ export async function startDevServer(port: number, projectDir: string, config: R
                   let fnSources: Record<string, string> | undefined;
                   let errorMessage = bundleError ? bundleError.message : '';
                   if (!treeChanged && !bundleError && hotEditedSource !== null) {
-                    // Fast path: the targeted chunk rebuild already produced
-                    // the stripped component source — just add route-name
-                    // aliases.
+                    // Fast path: the direct shared-parse compile produced the
+                    // stripped component source — just add route-name aliases.
                     let compCode = hotEditedSource;
                     for (const cname of changedComponents) {
                       if (hotActualName && hotActualName !== cname) {
@@ -1084,6 +1204,13 @@ export async function startDevServer(port: number, projectDir: string, config: R
                   ((globalThis as Record<string, unknown>).__vesk_broadcastHmr as (msg: Record<string, unknown>) => void)({ type: 'reload' });
                 }
               }
+              // Refresh the in-memory chunk map in the background so future
+              // navigations serve the freshly compiled component without the
+              // browser ever waiting on esbuild. Skipped for the full-rebuild
+              // paths, which already regenerated every chunk synchronously.
+              if (!treeChanged && !isOutsideApp && !fileDeleted && fileExists && !bundleError) {
+                queueClientChunksRefresh(fullPath, filename, fileExists);
+              }
               const cssChanged = await cssPromise;
               if (cssChanged && typeof (globalThis as Record<string, unknown>).__vesk_broadcastHmr === 'function') {
                 ((globalThis as Record<string, unknown>).__vesk_broadcastHmr as (msg: Record<string, unknown>) => void)({ type: 'css-update' });
@@ -1093,7 +1220,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
               LOG.err(`rebuild error:`, (e as Error).message);
             }
           }, HMR_DEBOUNCE_MS);
-        } else if (isCss) {
+        } else if (kind === 'css') {
           if (cssDebounceTimer) clearTimeout(cssDebounceTimer);
           cssDebounceTimer = setTimeout(async () => {
             try {
@@ -1109,11 +1236,30 @@ export async function startDevServer(port: number, projectDir: string, config: R
               LOG.err(`CSS rebuild error:`, (e as Error).message);
             }
           }, HMR_DEBOUNCE_MS);
-        } else if (isApiRoute) {
+        } else if (kind === 'config' || kind === 'script') {
+          // API routes compile per-request with an mtime-busted cache — no
+          // rebuild needed, just invalidate. Everything else (non-API .ts/.js
+          // helpers anywhere in the project, root scripts, middleware,
+          // vesk.config/tsconfig/package.json) is read indirectly — by the
+          // per-request SSR/API compile or the next client build — so the fix
+          // is a warm full rebuild + reload. Cache-backed, so the watcher only
+          // pays for the edited file.
           const isInApi = fullPath.includes('/api/');
-          if (isInApi && fileExists) {
-            apiWatchCache.set(fullPath, Date.now());
+          if (isInApi) {
+            if (fileExists) apiWatchCache.set(fullPath, Date.now());
+            return;
           }
+          if (debounceTimer) clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(async () => {
+            const t0 = Date.now();
+            try {
+              bcast({ type: 'compiling' });
+              await fullRebuild();
+              LOG.info(`${kind === 'config' ? 'config' : 'script'} changed, full rebuild + reload (${filename}) — ${Date.now() - t0}ms`);
+            } catch (e) {
+              LOG.err(`rebuild error:`, (e as Error).message);
+            }
+          }, HMR_DEBOUNCE_MS);
         }
       });
   } catch (e) {

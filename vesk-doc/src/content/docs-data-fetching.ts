@@ -18,13 +18,13 @@ export const pages: { slug: string; title: string; description: string; group: s
       {
         kind: "p",
         text:
-          "Vesk's data layer is built on reactive resources. A resource represents an async value derived from a fetcher: it exposes live `loading`, `error` and `data` state, dedupes in-flight requests by key, retries failed GETs with exponential backoff, honours a client cache via `staleTime`, and hands payloads fetched on the server to the client so hydration never re-fetches.",
+          "Say your app lists posts on load, refreshes that list after a save, and shouldn't re-request the same data every time the user navigates back to it. You could hand-roll fetch + loading state + cache, but then you also owe yourself dedupe (two components asking for the same thing), retries with backoff for flaky networks, a cache that expires, and the SSR problem: the server already fetched the posts, so the client has no business fetching them again during hydration. Vesk's data layer packages all of it as reactive resources. A resource represents an async value derived from a fetcher: it exposes live `loading`, `error` and `data` state, dedupes in-flight requests by key, retries failed GETs with exponential backoff, honours a client cache via `staleTime`, and hands payloads fetched on the server to the client so hydration never re-fetches.",
       },
       { kind: "h2", text: "The Resource object" },
       {
         kind: "p",
         text:
-          "`useFetch` and `createResource` both return a `Resource<T>`. It is a `PromiseLike<T>` (`await resource` resolves to `data` and rejects with `resource.error`), and its state fields are reactive — the compiler can branch on them in `if (res.loading)` / `if (res.error)` guards inside component bodies.",
+          "`useFetch` and `createResource` both return a `Resource<T>` — one object that is simultaneously your loading flag, your error channel, and your eventual payload. It is a `PromiseLike<T>` (`await resource` resolves to `data` and rejects with `resource.error`), so you can both read its state imperatively and `await` it inside a server component. Its state fields are reactive — the compiler can branch on them in `if (res.loading)` / `if (res.error)` guards inside component bodies, which is the idiomatic loading pattern in Vesk (Suspense is not implemented; this guard is the way).",
       },
       {
         kind: "table",
@@ -42,7 +42,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       {
         kind: "p",
         text:
-          "`useFetch<T>(urlOrFn, options?)` fetches a URL and parses the response as JSON. It is auto-imported inside components. With a string URL, the URL itself becomes the `key`; with a function fetcher, pass an explicit `key` so dedupe, cache and SSR handoff can identify it. On the server the request is run before the HTML is emitted and the payload is stashed for the client; on the client the payload is reused instead of re-fetching.",
+          "`useFetch<T>(urlOrFn, options?)` fetches a URL and parses the response as JSON — the workhorse for hitting your own API routes, and auto-imported inside components so you rarely write the import yourself. With a string URL, the URL itself becomes the `key`; with a function fetcher, pass an explicit `key` so dedupe, cache and SSR handoff can identify it. The key is what ties resources together: two components that `useFetch('/api/posts', { key: 'posts' })` share one in-flight request and one cache entry. On the server the request is run before the HTML is emitted and the payload is stashed for the client; on the client the payload is reused instead of re-fetching — the same URL doesn't get fetched twice per page load.",
       },
       {
         kind: "tabs",
@@ -107,13 +107,13 @@ component PostList() {
         kind: "note",
         tone: "info",
         text:
-          "`staleTime` only affects the client cache: after a successful fetch the payload is kept in `globalThis.__vsk_fetch_cache` and reused without a network request while `Date.now() - fetchedAt < staleTime`. It never affects server rendering.",
+          "`staleTime` only affects the client cache: after a successful fetch the payload is kept in `globalThis.__vsk_fetch_cache` and reused without a network request while `Date.now() - fetchedAt < staleTime`. It never affects server rendering — the server always fetches fresh, and hands that fresh value to the client.",
       },
       { kind: "h2", text: "into: writing the payload into a tracked cell" },
       {
         kind: "p",
         text:
-          "Give `useFetch` an `into` target and the payload is written into a tracked cell via `set()` the moment it lands — no `await resource`, no `.data` lookups. The cell is the single source of truth: `loading` and `error` still read from the returned `Resource`, but the payload renders straight from the cell, so any code that reads the cell (a loop, a `derived`, another component passed the cell) stays in sync automatically.",
+          "Reading `res.data` works, but it ties your render to the resource object. Give `useFetch` an `into` target and the payload is written into a tracked cell via `set()` the moment it lands — no `await resource`, no `.data` lookups. The cell becomes the single source of truth: `loading` and `error` still read from the returned `Resource`, but the payload renders straight from the cell, so any code that reads the cell (a loop, a `derived`, another component passed the cell) stays in sync automatically. This is the pattern for mutable UI — a list you can optimistically edit, a draft you stream into.",
       },
       {
         kind: "p",
@@ -202,7 +202,7 @@ component PostList() {
       {
         kind: "p",
         text:
-          "`UseFetchOptions<T>` extends `RequestInit` (minus `body`) with Vesk-specific controls. The same options object is accepted by `createResource`.",
+          "`UseFetchOptions<T>` extends `RequestInit` (minus `body`) with Vesk-specific controls — the ones in the table below are the parts of the data layer you'll actually tune. The same options object is accepted by `createResource`.",
       },
       {
         kind: "table",
@@ -225,7 +225,12 @@ component PostList() {
       {
         kind: "p",
         text:
-          "Any remaining `RequestInit` fields pass straight through: `credentials`, `cache`, `mode`, `redirect`, `referrer`, `referrerPolicy`, `integrity`, `keepalive` and `signal`.",
+          "Any remaining `RequestInit` fields pass straight through to the underlying fetch: `credentials`, `cache`, `mode`, `redirect`, `referrer`, `referrerPolicy`, `integrity`, `keepalive` and `signal`.",
+      },
+      {
+        kind: "p",
+        text:
+          "Most apps tune a small subset — retry a flaky endpoint a couple of times with backoff, cap it at a timeout you're willing to wait for, and attach whatever auth header the endpoint expects. Everything else keeps its default:",
       },
       {
         kind: "tabs",
@@ -294,6 +299,11 @@ component OptionalPosts() {
       },
       { kind: "h2", text: "Static helpers" },
       {
+        kind: "p",
+        text:
+          "JSON is the common case, but not the only one — a license file, a policy document, a binary asset all want a different reader. `useFetch` ships three static variants that differ only in how they consume the response body:",
+      },
+      {
         kind: "list",
         items: [
           "`useFetch.json<T>(url, options?)` — explicit JSON reader (same as plain `useFetch`).",
@@ -304,7 +314,7 @@ component OptionalPosts() {
       {
         kind: "p",
         text:
-          "Each static helper accepts the same `UseFetchOptions` and returns a `Resource`. They default their `key` to the URL, like plain `useFetch`.",
+          "Each static helper accepts the same `UseFetchOptions` and returns a `Resource`. They default their `key` to the URL, like plain `useFetch`, so they participate in dedupe, caching and SSR handoff without extra config. Reach for `text`/`arrayBuffer` when the endpoint returns something that isn't JSON — a text asset avoids an unnecessary parse, and a binary download lands as a buffer you can hand straight to a blob URL.",
       },
       {
         kind: "tabs",
@@ -359,7 +369,7 @@ component Account() {
       {
         kind: "p",
         text:
-          "`useFetch.stream(urlOrFn, options?)` consumes a response body chunk by chunk and writes the running total into a tracked cell via `into`, so anything subscribed to that cell re-renders as data arrives. An optional `onChunk(chunk, total)` callback fires after each chunk. `urlOrFn` may be a provider function `() => string` that is re-evaluated on every fetch (including `refresh()`), so switching a tracked path propagates without recreating the resource. The URL must reference an API route that returns `text/plain` or streams plain text.",
+          "Sometimes the wait is the content. A chat log, a long document, an LLM streaming tokens — you want the UI to fill in as bytes arrive, not after the whole body lands. `useFetch.stream(urlOrFn, options?)` consumes a response body chunk by chunk and writes the running total into a tracked cell via `into`, so anything subscribed to that cell re-renders as data arrives. An optional `onChunk(chunk, total)` callback fires after each chunk. `urlOrFn` may be a provider function `() => string` that is re-evaluated on every fetch (including `refresh()`), so switching a tracked path propagates without recreating the resource. The URL must reference an API route that returns `text/plain` or streams plain text.",
       },
       {
         kind: "tabs",
@@ -406,7 +416,7 @@ component DocReader(props: { id: string }) {
       {
         kind: "p",
         text:
-          "`createResource<T>(fn, key?, into?, options?)` wraps an arbitrary async function as a resource — use it when the data comes from something other than a fetch (a computation, a socket, an SDK call) or when you want to control HTTP handling yourself (unlike `useFetch` it does not check `res.ok`, so a 404 is fetched data unless your fetcher throws). `key` is also derived from `options.key` or the fetcher source when omitted.",
+          "`useFetch` assumes HTTP: it builds the request, and it throws `HttpError` whenever the response isn't ok. `createResource<T>(fn, key?, into?, options?)` wraps an arbitrary async function as a resource — use it when the data comes from something other than a fetch (a computation, a socket, an SDK call) or when you want to control HTTP handling yourself (unlike `useFetch` it does not check `res.ok`, so a 404 is fetched data unless your fetcher throws). `key` is also derived from `options.key` or the fetcher source when omitted.",
       },
       {
         kind: "tabs",
@@ -460,7 +470,7 @@ component UserProfile(props: { userId: string }) {
       {
         kind: "p",
         text:
-          "The third argument is `into` (a raw tracked cell), and the fourth is the full `UseFetchOptions`. With `into`, the payload lands in the cell and the component renders from the cell directly:",
+          "The third argument is `into` (a raw tracked cell), and the fourth is the full `UseFetchOptions`. With `into`, the payload lands in the cell and the component renders from the cell directly — the resource does the fetching, the cell does the rendering:",
       },
       {
         kind: "tabs",
@@ -515,7 +525,7 @@ component Settings() {
       {
         kind: "p",
         text:
-          "`mutate(key, data?)` updates the client-side cache and every live resource registered under `key` (client only — it is a no-op on the server). With `data`, it writes the cache and settles all handles to `{ loading: false, error: null, data }` without a network request — a classic optimistic update. Without `data`, it revalidates: the in-flight request is aborted and every handle re-runs its fetcher.",
+          "After you POST a new post or DELETE a comment, the list on screen is stale. `mutate(key, data?)` is how you tell every live resource for that key you already know the answer — or that they should go find out. It updates the client-side cache and every live resource registered under `key` (client only — it is a no-op on the server). With `data`, it writes the cache and settles all handles to `{ loading: false, error: null, data }` without a network request — a classic optimistic update that keeps the UI snappy while your API call is in flight. Without `data`, it revalidates: the in-flight request is aborted and every handle re-runs its fetcher.",
       },
       {
         kind: "code",
@@ -529,12 +539,17 @@ mutate('posts', { id: 999, title: 'Local preview' });
 mutate('posts');`,
       },
       {
+        kind: "p",
+        text:
+          "The two forms work together naturally in a form flow: optimistically show the new post, then after the server confirms the write, revalidate to reconcile with what the server actually stored:",
+      },
+      {
         kind: "tabs",
         tabs: [
           {
             label: "statement mode",
             filename: "app/components/CreatePost.vsk",
-            code: `import { mutate } from '@vesk/runtime';
+            code: `import { mutate } from '@vesk/runtime/src/resource';
 
 interface Post {
   id: number;
@@ -559,7 +574,7 @@ component CreatePost() {
           {
             label: "expression mode",
             filename: "app/components/CreatePost.vsk",
-            code: `import { mutate } from '@vesk/runtime';
+            code: `import { mutate } from '@vesk/runtime/src/resource';
 
 interface Post {
   id: number;
@@ -589,7 +604,7 @@ component CreatePost() {
       {
         kind: "p",
         text:
-          "A failed fetch never throws synchronously — the error lands on `resource.error` and `await resource` rejects with it. `useFetch` throws an `HttpError` whenever `res.ok` is false; a `timeout` rejects with a `TimeoutError` and aborts the underlying request at the same time. An `abort()` or destroyed block surfaces an abort error.",
+          "A failed fetch never throws synchronously — the error lands on `resource.error` and `await resource` rejects with it. That single channel gives you one place to look and one guard to write. `useFetch` throws an `HttpError` whenever `res.ok` is false; a `timeout` rejects with a `TimeoutError` and aborts the underlying request at the same time. An `abort()` or destroyed block surfaces an abort error.",
       },
       {
         kind: "table",
@@ -603,7 +618,12 @@ component CreatePost() {
       {
         kind: "p",
         text:
-          "`HttpError`, `TimeoutError` and `mutate` live in `@vesk/runtime/src/resource` — import them from the module subpath.",
+          "`HttpError`, `TimeoutError` and `mutate` live in `@vesk/runtime/src/resource` — import them from the module subpath when you need the classes (to `instanceof`-check) or `mutate` outside a component.",
+      },
+      {
+        kind: "p",
+        text:
+          "Because the error is a typed value, your error UI can branch on what actually went wrong — a 404 isn't a timeout, and a slow network deserves a different message than a dead endpoint:",
       },
       {
         kind: "tabs",
@@ -668,18 +688,18 @@ component PostList() {
         kind: "note",
         tone: "warn",
         text:
-          "Retries only apply to GET requests, and an `HttpError` with status 400–499 is never retried. On the client the retry delay is exponential (`retryDelay * 2^attempt`); on the server it is a constant `retryDelay`.",
+          "Retries only apply to GET requests, and an `HttpError` with status 400–499 is never retried — retrying a 401 or a 422 is how you get spammed by your own client. On the client the retry delay is exponential (`retryDelay * 2^attempt`); on the server it is a constant `retryDelay`.",
       },
       { kind: "h2", text: "SSR data handoff" },
       {
         kind: "p",
         text:
-          "Every resource keyed the same on both sides is handed off automatically: the server runs the request, stashes the payload with `setSsrData(key, value)` into `globalThis.__vsk_ssr_data`, and serializes it into the HTML; on the client `getSsrData(key)` settles the resource instantly, so hydration does not re-fetch. Failed SSR requests are memoized per render token so the server's re-render passes settle from the recorded error instead of re-firing a request that always fails (e.g. a 401).",
+          "The point of server rendering is that the HTML arrives with the data already in it — and the client shouldn't pay for that data twice. Every resource keyed the same on both sides is handed off automatically: the server runs the request, stashes the payload with `setSsrData(key, value)` into `globalThis.__vsk_ssr_data`, and serializes it into the HTML; on the client `getSsrData(key)` settles the resource instantly, so hydration does not re-fetch. Failed SSR requests are memoized per render token so the server's re-render passes settle from the recorded error instead of re-firing a request that always fails (e.g. a 401).",
       },
       {
         kind: "p",
         text:
-          "For data fetched outside a resource (e.g. a top-level loader) you can use the same handoff APIs directly. They are exported from `@vesk/runtime`; `setSsrSink` additionally requires the server entry (`@vesk/runtime/server`).",
+          "The mechanism is also available directly when you fetch outside a resource — say a top-level loader for page metadata. Use the same handoff APIs so the client can read what the server already knew. They are exported from `@vesk/runtime`; `setSsrSink` additionally requires the server entry (`@vesk/runtime/server`).",
       },
       {
         kind: "code",
@@ -727,13 +747,13 @@ export async function loadPageData() {
       {
         kind: "p",
         text:
-          "Vesk tracks browser connectivity through the Network Information API and `navigator.onLine`. It is designed for connectivity-aware boundaries and the router's offline fallback UI, and it degrades gracefully where the API is missing (Safari/Firefox): the extra fields become `null` / `'unknown'` and consumers fall back to the `online` flag alone.",
+          "Your app's behavior legitimately changes with its connection: a video player drops quality on 2g, a chat shows 'reconnecting' when Wi-Fi blips, and a docs sidebar should stay usable offline. Vesk tracks browser connectivity through the Network Information API and `navigator.onLine`. It is designed for connectivity-aware boundaries and the router's offline fallback UI, and it degrades gracefully where the API is missing (Safari/Firefox): the extra fields become `null` / `'unknown'` and consumers fall back to the `online` flag alone.",
       },
       { kind: "h2", text: "getNetworkState" },
       {
         kind: "p",
         text:
-          "`getNetworkState()` returns a snapshot of the current connectivity as a plain `NetworkState` object. It is a read, not a subscription — combine it with `watchNetwork` to react to changes.",
+          "`getNetworkState()` returns a snapshot of the current connectivity as a plain `NetworkState` object — useful the moment you need one fact (\"are we online right now?\") without signing up for updates. It is a read, not a subscription — combine it with `watchNetwork` to react to changes.",
       },
       {
         kind: "table",
@@ -763,7 +783,7 @@ console.log(state.saveData);      // boolean`,
       {
         kind: "p",
         text:
-          "`watchNetwork(cb)` subscribes to connectivity changes — online/offline flips plus `connection.change` events where the Network Information API is supported — and calls `cb(state)` with a fresh `NetworkState` on every change. It returns an unsubscribe function, and it is a no-op-safe no-op on the server (no `window` access is attempted). It is not auto-imported, so pull it from `@vesk/runtime`.",
+          "A screenshot won't update itself. `watchNetwork(cb)` subscribes to connectivity changes — online/offline flips plus `connection.change` events where the Network Information API is supported — and calls `cb(state)` with a fresh `NetworkState` on every change, so your UI re-renders the moment the connection does. It returns an unsubscribe function, and it is a no-op-safe no-op on the server (no `window` access is attempted). It is not auto-imported, so pull it from `@vesk/runtime`.",
       },
       {
         kind: "tabs",
@@ -809,7 +829,7 @@ component NetworkStatus() {
       {
         kind: "p",
         text:
-          "For a richer badge that reacts to the full state object, keep a tracked cell of the whole `NetworkState` and write it from the subscription:",
+          "Tracking just `online` is enough for a status dot. For a richer badge that reacts to the full state object — connection quality, data-saver mode, everything — keep a tracked cell of the whole `NetworkState` and write it from the subscription. The cell starts from the current snapshot, so the first render is already correct:",
       },
       {
         kind: "tabs",
@@ -858,7 +878,7 @@ component ConnectionBadge() {
         kind: "note",
         tone: "warn",
         text:
-          "On browsers without the Network Information API, `effectiveType` stays `'unknown'` and `downlink` / `rtt` are `null` — never assume those fields are present. Only `online` is universally available.",
+          "On browsers without the Network Information API, `effectiveType` stays `'unknown'` and `downlink` / `rtt` are `null` — never assume those fields are present, or your badge will render 'undefined' next to data-saver states. Only `online` is universally available.",
       },
     ],
   },

@@ -55,11 +55,11 @@ const basePages: DocPage[] = [
     blocks: [
       {
         kind: "p",
-        text: "Vesk is a compiler-first framework. You write one component model in .vsk files (a TypeScript superset), and the compiler emits optimized output per target: server-rendered HTML plus direct-DOM client code for the web, and Kotlin for native. There is no diffing runtime shipped to your users.",
+        text: "Say you're starting a new app and you want the good parts of a framework — routing, SSR, reactivity, SEO — without piling a mystery runtime between your code and the DOM. Vesk's answer is to push that work into the compiler. You write one component model in .vsk files (a TypeScript superset), and the compiler emits the output per target: server-rendered HTML plus direct-DOM client code for the web, Kotlin for native. No diffing runtime ships to your users — the DOM update code is generated for you at build time.",
       },
       {
         kind: "p",
-        text: "The compiler process is explicit — it has no hidden evaluator. Source is preprocessed, parsed, lowered to an intermediate representation, then codegen'd to platform code.",
+        text: "The compiler is an explicit four-stage pipeline, not a hidden evaluator: source is preprocessed, parsed, lowered to an intermediate representation, then codegen'd to platform code. When output behaves a certain way, you can trace it back to the IR that produced it.",
       },
       { kind: "h2", text: "Create a project" },
       {
@@ -72,7 +72,7 @@ npm run dev`,
       },
       {
         kind: "p",
-        text: "create-vesk scaffolds a complete app (routes, layout, middleware, API routes, Tailwind entry). The package scripts then drive the compiler. The dev server prints its address when it starts and reports each rebuild:",
+        text: "create-vesk scaffolds a working app — routes, layout, middleware, API routes, a Tailwind entry — so the first thing you see is a running page, not an empty folder. The package scripts are thin wrappers around the Vesk CLI. In dev the server prints its address on startup and reports each rebuild as you save a file:",
       },
       {
         kind: "code",
@@ -83,7 +83,7 @@ vesk dev: rebuilt in 11ms`,
       {
         kind: "note",
         tone: "info",
-        text: "The dev server watches app/ and public/, recompiles affected routes on change, serves /api/* routes and middleware, and pushes HMR updates over a WebSocket.",
+        text: "Dev is incremental by design: the server watches app/ and public/, recompiles only the affected route on change, serves /api/* routes and middleware, and pushes HMR updates over a WebSocket. Editing a component re-renders it in place without a full page reload or lost client state.",
       },
       { kind: "h2", text: "Project layout" },
       {
@@ -107,6 +107,10 @@ public/                   # static assets
 vesk.config.ts
 package.json`,
       },
+      {
+        kind: "p",
+        text: "Two files carry most of the early work. app/layout.vsk is the root layout: whatever you put in it wraps every route via {props.children}, which is where the site chrome — navigation, a footer — lives. app/blog/[slug]/page.vsk is one route per blog post; the file path maps to a dynamic segment, so the URL /blog/hello-world finds this file with props: { slug: 'hello-world' }.",
+      },
       { kind: "h2", text: "CLI commands" },
       {
         kind: "table",
@@ -123,7 +127,7 @@ package.json`,
       { kind: "h2", text: "Type safety" },
       {
         kind: "p",
-        text: "Every .vsk file is a TypeScript superset: all TS constructs parse, survive codegen, and pass through vskToTsx for tsc. Types are checked on the component boundary just like exported functions, and `vesk typecheck` runs the same tsc-in-.vsk pipeline.",
+        text: "Every .vsk file is a superset of TypeScript: all TS constructs parse, survive codegen, and round-trip through vskToTsx for tsc. That buys real checks at the component boundary — props are typed inputs, and the compiler treats them like the parameters of an exported function. `vesk typecheck` runs that same tsc-in-.vsk pipeline, strict by default, so a failing check means the same thing it would in a plain tsc run.",
       },
     ],
   },
@@ -136,7 +140,7 @@ package.json`,
     blocks: [
       {
         kind: "p",
-        text: "`component` is the Vesk component keyword — the unit of markup, state and effects. The compiler transforms a component body into IR and generates both server (SSR) and client (hydration) code from it.",
+        text: "Say you're writing your first piece of markup — a greeting, a page, a header. `component` is the keyword you reach for: it's the unit of markup, state, and effects. Declare one, and the compiler generates two programs from that single body: server code that renders HTML (SSR) and client code that hydrates it and keeps the tracked values in sync with the DOM afterward.",
       },
       { kind: "h2", text: "Syntax" },
       {
@@ -181,17 +185,17 @@ export default async component Page(props: { id: string }) {
       {
         kind: "list",
         items: [
-          "`component` is a reserved keyword — using it as an identifier raises a compiler error.",
-          "Params are optional and fully TypeScript-typed; `component Name { }` is the same as `component Name() { }`.",
-          "Generic type parameters are supported: `component List<T>(props: { items: T[] }) { ... }`.",
-          "`async` may appear directly before `component` or after `export`: `export default async component X() { ... }`.",
-          "`client` (the island modifier) may appear after the closing paren or after `component` — both parse to the same `client: true` flag.",
+          "`component` is a reserved keyword — using it as an identifier raises a compiler error, so there is never ambiguity about which positions are declarations.",
+          "Params are optional and fully TypeScript-typed; `component Name { }` is the same as `component Name() { }`, and props arrive as a typed object you can annotate inline or via an interface.",
+          "Generic type parameters are supported: `component List<T>(props: { items: T[] }) { ... }` — handy when a component should stay reusable across element types.",
+          "`async` may appear directly before `component` or after `export`: `export default async component X() { ... }`. This is how you write server components that fetch before rendering, as the `Page` example above does.",
+          "`client` (the island modifier) may appear after the closing paren or after `component` — both parse to the same `client: true` flag, so pick whichever reads better in context.",
         ],
       },
       { kind: "h2", text: "Body modes" },
       {
         kind: "p",
-        text: "A component body is either expression mode — it ends with `return <jsx>;` — or statement mode — markup and control flow appear directly as statements (bare JSX, `if`, `for`, `switch`, `try`, guard-clause early returns). Both modes produce the same IR nodes, so every feature works in both.",
+        text: "A component body is either expression mode — it ends with `return <jsx>;` — or statement mode, where markup and control flow appear directly as statements (bare JSX, `if`, `for`, `switch`, `try`, guard-clause early returns). Both modes lower to the same IR nodes, so every feature works in both; the choice is about how the body reads, not what it can do.",
       },
       {
         kind: "tabs",
@@ -200,7 +204,7 @@ export default async component Page(props: { id: string }) {
             label: "statement mode",
             filename: "app/components/Counter.vsk",
             code: `component Counter(props: { initial: number }) {
-  let &[count] = track(props.initial);
+  const &[count] = track(props.initial);
   <button onClick={() => count++}>Count: {count}</button>
 }`,
           },
@@ -208,16 +212,20 @@ export default async component Page(props: { id: string }) {
             label: "expression mode",
             filename: "app/components/Counter.vsk",
             code: `component Counter(props: { initial: number }) {
-  let &[count] = track(props.initial);
+  const &[count] = track(props.initial);
   return <button onClick={() => count++}>Count: {count}</button>;
 }`,
           },
         ],
       },
       {
+        kind: "p",
+        text: "Same component, two spellings — the only difference is the `return`. The tracked cell, the click handler, the interpolation: identical in both, because both compile through the same IR.",
+      },
+      {
         kind: "note",
         tone: "info",
-        text: "The parser emits a `ComponentDeclaration` node with id, params, body, async, client and optional typeParameters fields — the AST shape the IR generator consumes.",
+        text: "The parser emits a `ComponentDeclaration` node with id, params, body, async, client and optional typeParameters fields — the AST shape the IR generator consumes. Because the modifier is a flag on that node, the two spellings of `client` behave identically.",
       },
     ],
   },
@@ -230,22 +238,22 @@ export default async component Page(props: { id: string }) {
     blocks: [
       {
         kind: "p",
-        text: "The `&[]` track-declaration syntax is Vesk's sugar for creating reactive cells — it combines cell creation with variable binding in a single statement.",
+        text: "Say you have a value the DOM has to react to — a count, a price, a filter string. You want to declare \"this is a reactive cell\" in one line and let the compiler route every read and write through the runtime, so you never type get()/set() by hand. That's the `&[]` track-declaration: it creates a cell and binds names to it in a single statement.",
       },
       { kind: "h2", text: "Syntax" },
       {
         kind: "code",
         filename: "app/components/Counter.vsk",
-        code: `let &[count] = track(0);           // count is the auto-tracked cell
-const &[items] = track<string[]>([]);  // works with const too
-let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
+        code: `const &[count] = track(0);           // count is the auto-tracked reactive value
+const &[items] = track<string[]>([]);  // generic cells type normally
+const &[total, rawTotal] = track(0);   // rawTotal is the raw Tracked<number> cell`,
       },
       {
         kind: "list",
         items: [
-          "The first name is the reactive value — reads inside effects or component bodies subscribe, writes schedule an update automatically.",
-          "The optional second name is the raw cell object, used with `untrack()`, `peek()` or when passing the cell around.",
-          "Each `&[]` creates its own cell; there is no multi-cell shorthand.",
+          "The first name is the reactive value. Reads inside effects or component bodies subscribe to it; writes schedule an update automatically.",
+          "The optional second name is the raw cell object, used with `untrack()`, `peek()` or when passing the cell around instead of its current value.",
+          "Each `&[]` creates exactly one cell of its own; there is no multi-cell shorthand.",
           "`&[]` can only appear at the top level of a component body, or inside a `block()`/`effect()`/`root()` call.",
         ],
       },
@@ -262,7 +270,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
       },
       {
         kind: "p",
-        text: "You never call `get()` or `set()` manually when using `&[]` bindings — the compiler inserts them for you. The `&[]` binding atom is parsed with `lazy: true` and becomes a `TrackDecl` IR node.",
+        text: "Every `count` in your code is rewritten to a `get()` or `set()` call during compilation — you write the cell name, the runtime does the tracking. The `&[]` binding atom is parsed with `lazy: true` and becomes a `TrackDecl` IR node, which is how the server and client codegen can treat it uniformly even though they emit very different code.",
       },
       { kind: "h2", text: "Derived cells" },
       {
@@ -272,7 +280,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
             label: "statement mode",
             filename: "app/components/Price.vsk",
             code: `component Price(props: { qty: number, unit: number }) {
-  let &[total] = derived(() => props.qty * props.unit);
+  const &[total] = derived(() => props.qty * props.unit);
   <p>Total: {total}</p>
 }`,
           },
@@ -280,7 +288,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
             label: "expression mode",
             filename: "app/components/Price.vsk",
             code: `component Price(props: { qty: number, unit: number }) {
-  let &[total] = derived(() => props.qty * props.unit);
+  const &[total] = derived(() => props.qty * props.unit);
   return <p>Total: {total}</p>;
 }`,
           },
@@ -288,7 +296,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
       },
       {
         kind: "p",
-        text: "`total` is read-only — writing to it throws. The function re-runs whenever a tracked dependency read inside it changes.",
+        text: "`total` is read-only — assigning to it throws. Its function re-runs whenever the value of a tracked dependency read inside it changes, which is what makes derived cells safe to use anywhere you'd use a plain cell.",
       },
     ],
   },
@@ -301,7 +309,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
     blocks: [
       {
         kind: "p",
-        text: "Vesk reactivity is built on tracked cells created with `track()`. Reading a cell inside a component body or `effect()` subscribes; writing a cell schedules an update. There is no virtual DOM: the compiler emits per-cell DOM update code.",
+        text: "Say you have a counter, a form field, or any other piece of state that has to keep a piece of DOM honest. The model is a tracked cell created with `track()`. Reading a cell inside a component body or an `effect()` subscribes to it; writing a cell schedules an update. There's no virtual DOM — the compiler has already emitted per-cell DOM update code, so when state changes the browser runs a surgical set of mutations, not a rebuild of a whole tree.",
       },
       { kind: "h2", text: "Cell API" },
       {
@@ -323,17 +331,17 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
       },
       {
         kind: "p",
-        text: "All of these are auto-imported from `@vesk/runtime` when used inside components — no import statement needed.",
+        text: "Inside a component you never write an import statement for these — the compiler sees `track()`, `effect()`, `derived()` and friends in your body and imports them from `@vesk/runtime` for you. The table above is the whole public cell API; everything else in the runtime builds on it.",
       },
       { kind: "h2", text: "Scheduler semantics" },
       {
         kind: "list",
         items: [
-          "`set()` does not update the DOM synchronously — updates are microtask-batched, and multiple writes in one turn produce one flush.",
-          "`effect()` runs immediately on creation, then on dependency change.",
-          "`flushSync(fn)` flushes pending updates, runs fn with immediate DOM writes, and restores the async mode afterwards.",
-          "`await tick()` resolves after the frame the flush has painted.",
-          "The scheduler guards against effect loops — after 1001 flush rounds it throws: \"Maximum update depth exceeded. This typically indicates that an effect reads and writes the same piece of state.\"",
+          "`set()` does not touch the DOM synchronously — updates are microtask-batched, so several writes in one turn produce exactly one flush.",
+          "`effect()` runs immediately on creation, then again on every dependency change. That eager first run is what makes effects good for wiring up listeners and subscriptions.",
+          "`flushSync(fn)` flushes pending updates, runs fn with immediate DOM writes, and restores async mode afterwards. Use it when a test or a library needs the DOM current *now*.",
+          "`await tick()` resolves after the frame the flush has painted — the \"after the browser has caught up\" escape hatch.",
+          "The scheduler guards against effect loops: after 1001 flush rounds it throws: \"Maximum update depth exceeded. This typically indicates that an effect reads and writes the same piece of state.\"",
         ],
       },
       {
@@ -349,7 +357,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
             label: "statement mode",
             filename: "app/components/Counter.vsk",
             code: `component Counter {
-  let &[count] = track(0);
+  const &[count] = track(0);
 
   effect(() => {
     console.log("count is", count);
@@ -364,7 +372,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
             label: "expression mode",
             filename: "app/components/Counter.vsk",
             code: `component Counter {
-  let &[count] = track(0);
+  const &[count] = track(0);
 
   effect(() => {
     console.log("count is", count);
@@ -390,17 +398,17 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
     blocks: [
       {
         kind: "p",
-        text: "Expression mode is the classic component body style: the body computes a single `return <jsx>;` expression. It is the simplest way to write a component and the default for one-liners.",
+        text: "Say you've written React or JSX before: expression mode is the body style that already feels like home. The body computes a single `return <jsx>;` at the end, with guard clauses and a few `.map()` calls along the way. It's the simplest way to write a component and the natural default for one-liners and mostly-static layouts.",
       },
       { kind: "h2", text: "Rules" },
       {
         kind: "list",
         items: [
-          "The body must end with `return <jsx>;`.",
-          "Guard-clause early returns are allowed before the final return.",
+          "The body must end with `return <jsx>;` — that final return is the value of the component.",
+          "Guard-clause early returns are allowed before the final return, which is how you bail out to a loading or empty state without nesting the rest of the body.",
           "`.map()` callbacks render collections; a `key` prop is recommended for reconciliation — the compiler extracts the key expression from the JSX child.",
-          "Ternary and `&&` expressions work inside `{}`.",
-          "Fragments are supported; adjacent top-level JSX is not.",
+          "Ternary and `&&` expressions work inside `{}` — the conditional equivalents of `if`.",
+          "Fragments are supported; adjacent top-level JSX is not (wrap siblings in a fragment or parent instead).",
         ],
       },
       {
@@ -438,7 +446,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
       { kind: "h2", text: "Relationship to statement mode" },
       {
         kind: "p",
-        text: "Statement mode is the statement-level equivalent — bare JSX, `if`, `for`, `switch`, `try`, and guard clauses without a wrapper return. Every body feature available in expression mode is available in statement mode and vice versa.",
+        text: "Statement mode is the statement-level equivalent — bare JSX, `if`, `for`, `switch`, `try`, and guard clauses without a wrapper return. Every body feature available in expression mode is available in statement mode and vice versa; which one you reach for is mostly about which reads better for the shape of the component.",
       },
       {
         kind: "tabs",
@@ -470,6 +478,11 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
           },
         ],
       },
+      {
+        kind: "note",
+        tone: "info",
+        text: "Both modes lower to the same IR node types — the `for ... ; key` loop and the `.map()` call both become a MapRegion — so switching between them is a formatting decision, not an architecture one.",
+      },
     ],
   },
   {
@@ -481,7 +494,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
     blocks: [
       {
         kind: "p",
-        text: "Statement mode is a first-class component body style: markup and control flow appear directly as statements, no `return` wrapper required. Every feature that works in expression mode also works in statement mode, and vice versa.",
+        text: "Statement mode is where a page starts to read like the page: markup and control flow appear directly as statements, no `return` wrapper required. Most real components are a sequence of guarded blocks — render the header, then only the cart list if it has items, otherwise an empty state — and that structure survives verbatim in statement mode. Every feature that works in expression mode also works here, and vice versa.",
       },
       {
         kind: "tabs",
@@ -490,7 +503,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
             label: "statement mode",
             filename: "app/components/List.vsk",
             code: `component List(props: { items: string[] }) {
-  let &[filter] = track("");
+  const &[filter] = track("");
 
   if (filter !== "") {
     <p>Filtered by: {filter}</p>
@@ -507,7 +520,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
             label: "expression mode",
             filename: "app/components/List.vsk",
             code: `component List(props: { items: string[] }) {
-  let &[filter] = track("");
+  const &[filter] = track("");
 
   return (
     <>
@@ -524,6 +537,10 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
         ],
       },
       { kind: "h2", text: "Statements the compiler understands" },
+      {
+        kind: "p",
+        text: "Statement bodies are not free-form. Anything you write inside a body is either one of the statements below — which the compiler lowers to reactive IR — or plain runtime code it passes through unchanged:",
+      },
       {
         kind: "table",
         head: ["Statement", "IR handling"],
@@ -544,7 +561,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
       {
         kind: "note",
         tone: "warn",
-        text: "`class Foo {}` inside a component body raises a compiler error — components are markup/state units, not class containers.",
+        text: "`class Foo {}` inside a component body raises a compiler error — components are markup/state units, not class containers. Define classes at module top level, outside the body.",
       },
       { kind: "h2", text: "for key / index clauses" },
       {
@@ -561,13 +578,17 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
       {
         kind: "list",
         items: [
-          "`; key <expr>` sets the reconciliation key expression.",
-          "`; index <ident>` binds the loop index to an identifier.",
+          "`; key <expr>` sets the reconciliation key expression — the identity the list reuses when rows are added, removed, or reordered.",
+          "`; index <ident>` binds the loop index to an identifier, so `<Row index={i} />` stays in sync with the row's position.",
           "Clauses are optional and combinable; only for...of/for...in headers may carry them (classic `for` keeps its normal semicolons).",
-          "The compiler blanks the clause text before parsing and recovers it from annotations, preserving source offsets.",
+          "The compiler blanks the clause text before parsing and recovers it from annotations, preserving source offsets — which is why error positions still point at real characters in your file.",
         ],
       },
       { kind: "h2", text: "Guard-clause early returns" },
+      {
+        kind: "p",
+        text: "A `return <jsx>` inside a statement-mode body is a guard clause, not the end of the function: it renders that markup and stops. It shines for handling loading, error, and auth states at the top of a body without indenting everything below it:",
+      },
       {
         kind: "tabs",
         tabs: [
@@ -600,7 +621,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
     blocks: [
       {
         kind: "p",
-        text: "Vesk is server-first by default: components render to HTML on the server, and interactivity is attached on the client through hydration. The `client` keyword and `{#client}`/`{#server}` blocks define that boundary explicitly.",
+        text: "Say you're building a page that is mostly static — marketing copy, a product description — but has one piece that has to be alive on the client: a live clock, a sign-in form, a comment composer. You don't want to make the whole page interactive to get there. Vesk is server-first by default: every component renders to HTML on the server, and you opt specific pieces into client behavior with the `client` island modifier or `{#client}`/`{#server}` blocks. That boundary is explicit, not inferred.",
       },
       { kind: "h2", text: "Islands: the client keyword" },
       {
@@ -610,7 +631,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
             label: "statement mode",
             filename: "app/components/Clock.vsk",
             code: `component Clock() client {
-  let &[now] = track(new Date());
+  const &[now] = track(new Date());
   effect(() => { /* interval etc. */ });
   <time>{now.toLocaleTimeString()}</time>
 }`,
@@ -619,7 +640,7 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
             label: "expression mode",
             filename: "app/components/Clock.vsk",
             code: `component Clock() client {
-  let &[now] = track(new Date());
+  const &[now] = track(new Date());
   effect(() => { /* interval etc. */ });
   return <time>{now.toLocaleTimeString()}</time>;
 }`,
@@ -629,13 +650,17 @@ let &[total, rawTotal] = track(0);     // rawTotal is the raw Tracked<number>`,
       {
         kind: "list",
         items: [
-          "Marking a component `client` makes it an island: it renders on both server and client.",
-          "The modifier goes after the params (`component X() client`) or directly after `component`.",
+          "Marking a component `client` makes it an island: it has an interactive client bundle, but it still renders on both server and client, so the first paint is HTML.",
+          "The modifier goes after the params (`component X() client`) or directly after `component` — both parse to the same flag.",
           "`client` composes with `export` and `async`: `export component X() client`.",
-          "Event-handler attributes (`on*`) are excluded from the SSR HTML entirely — the server carries the markup, the client bundle attaches behavior.",
+          "Event-handler attributes (`on*`) are excluded from the SSR HTML entirely — the server carries the markup, the client bundle attaches behavior. This is why an island's static shell shows up instantly and the interactivity is added later.",
         ],
       },
       { kind: "h2", text: "{#client} / {#server} blocks" },
+      {
+        kind: "p",
+        text: "A component kind decides which block syntax it may use. The compiler enforces this statically at any nesting depth — a mistake here is a compile error, never a silent runtime surprise:",
+      },
       {
         kind: "table",
         head: ["Component kind", "{#server}", "{#client}"],
@@ -689,12 +714,12 @@ component ClientOnly() client {
       },
       {
         kind: "p",
-        text: "`{#server}` blocks render in SSR and are stripped from the client bundle; `{#client}` blocks are stripped from SSR and render on the client. The `#server { ... }` / `#client { ... }` prefix forms parse to the identical VeskBlock node, and blocks nest and accept full statement-mode bodies.",
+        text: "`{#server}` blocks render in SSR and are stripped from the client bundle; `{#client}` blocks are stripped from SSR and render on the client. The `#server { ... }` / `#client { ... }` prefix forms parse to the identical VeskBlock node, and blocks nest and accept full statement-mode bodies — so you can guard a genuinely server-only chunk (a meta tag, a secret-derived value) without splitting it into its own component.",
       },
       { kind: "h2", text: "What ships to the client" },
       {
         kind: "p",
-        text: "A module produces a client bundle when any component is a `client` island or has a non-static body. A module where every component is fully static and non-client compiles to an empty client bundle.",
+        text: "The compiler only pays for interactivity where it exists. A module produces a client bundle when any component is a `client` island or has a non-static body (tracked cells, effects, on* handlers, bindings). A module where every component is fully static and non-client compiles to an empty client bundle — that page costs the user nothing in JavaScript.",
       },
     ],
   },
@@ -707,7 +732,7 @@ component ClientOnly() client {
     blocks: [
       {
         kind: "p",
-        text: "Components carry their own CSS in a `<style>` element. The compiler extracts the element from the body and hoists it to component level.",
+        text: "Say you want a card component whose styles always travel with it — no global stylesheet, no naming convention to police, no class-name collisions to debug. Drop a `<style>` element in the component body and Vesk scopes the CSS to that component: the compiler extracts the element and hoists it to component level, then emits it appropriately on each target.",
       },
       {
         kind: "tabs",
@@ -750,10 +775,10 @@ component ClientOnly() client {
       {
         kind: "list",
         items: [
-          "The IR generator removes `<style>` nodes from the render body and stores their text as the component's style property (extractStyle).",
-          "Server output emits a literal `<style>...</style>` block with the raw CSS.",
-          "Client output creates a `<style>` element keyed by the component identifier and appends it to document.head.",
-          "An unclosed `<style>` is a parse error: \"Unclosed `<style>` element: missing `</style>`\".",
+          "The IR generator removes `<style>` nodes from the render body and stores their text as the component's style property (extractStyle). The body's IR no longer contains them.",
+          "Server output emits a literal `<style>...</style>` block with the raw CSS — the stylesheet is on the page before any JavaScript has run.",
+          "Client output creates a `<style>` element keyed by the component identifier and appends it to document.head, so the styles load whether or not the server markup is present.",
+          "An unclosed `<style>` is a parse error: \"Unclosed `<style>` element: missing `</style>`\" — a missing closing tag is caught at build time, not left to corrupt the page.",
         ],
       },
     ],
@@ -767,7 +792,7 @@ component ClientOnly() client {
     blocks: [
       {
         kind: "p",
-        text: "Vesk includes a built-in `<Md>` component and `renderMarkdown()` function for rendering Markdown. The implementation is tokenizer-based (no regex) and supports syntax highlighting, GFM, and configurable HTML policies.",
+        text: "Say you're publishing blog posts or a docs site and the content arrives as Markdown strings. You want them rendered as HTML — syntax-highlighted code blocks, GFM tables and autolinks — without dragging a heavy runtime library into the page. Vesk's built-in `<Md>` component and `renderMarkdown()` cover that. The implementation is tokenizer-based (no regex in the compiler) and supports highlighting, GFM, streaming, and configurable HTML policies.",
       },
       {
         kind: "code",
@@ -775,6 +800,10 @@ component ClientOnly() client {
         code: `<Md content="# Hello\\n\\nThis is **bold**." />`,
       },
       { kind: "h2", text: "Content types" },
+      {
+        kind: "p",
+        text: "The same component handles four kinds of content, so rendering a hardcoded snippet and rendering a streamed fetch look identical at the call site:",
+      },
       {
         kind: "table",
         head: ["Type", "Behavior"],
@@ -799,6 +828,10 @@ component ClientOnly() client {
         ],
       },
       {
+        kind: "p",
+        text: "The `html` policy is the one to think about before you ship markdown that includes user-generated HTML: the default is `'escape'` (safe), `'allow'` passes markup through, and `'allowlist'` passes through only the tags you name. `configureMd({ ... })` sets the default for every `<Md>` on the site.",
+      },
+      {
         kind: "note",
         tone: "info",
         text: "`<Md>` content is polymorphic: a string renders synchronously, a Tracked<string> re-renders when the cell changes, a Resource/useFetch.stream progressively renders chunks, and a \"/path/to/*.md\" string loads from public/ at runtime.",
@@ -814,17 +847,17 @@ component ClientOnly() client {
     blocks: [
       {
         kind: "p",
-        text: "Explicit non-features. Vesk is a TypeScript superset — everything listed here is intentionally absent today, and the absence is a contract: code relying on any of these will not compile.",
+        text: "This page is a list of things deliberately *not* in Vesk, so you don't waste a session looking for them. Vesk is a TypeScript superset, and each entry here is a contract: code that relies on one of these will not compile, and that hard failure is a feature — it stops a subtly-wrong architecture at build time instead of in production.",
       },
       { kind: "h2", text: "Language" },
       {
         kind: "list",
         items: [
-          "No `defer` / streaming boundaries — SSR output is a static template per component.",
-          "No `class` declarations in component bodies — raises a compiler error.",
+          "No `defer` / streaming boundaries — SSR output is a static template per component. If you need progressive content, stream the data into a reactive region instead.",
+          "No `class` declarations in component bodies — raises a compiler error; define classes at module scope.",
           "No adjacent top-level JSX — siblings must be wrapped in `<>...</>` or a parent element.",
           "`component` is reserved and cannot be used as an identifier.",
-          "No `suspense` implementation — use the `if (loading)` + `createResource` pattern instead.",
+          "No `suspense` implementation — use the `if (loading)` + `createResource` pattern instead: `if (res.loading) return <p>Loading...</p>`.",
         ],
       },
       { kind: "h2", text: "Reactivity" },
@@ -832,7 +865,7 @@ component ClientOnly() client {
         kind: "list",
         items: [
           "No `batch`. Synchronous multi-write flushes use `flushSync(fn)`; the default scheduler is microtask-batched.",
-          "No React hooks. The equivalents are `track()`, `effect()`, `derived()`.",
+          "No React hooks. The equivalents are `track()`, `effect()`, `derived()` — the effects and lifecycle live in the component body, not in hook functions.",
           "No virtual DOM — updates compile to per-cell DOM mutations; there is no reconciliation tree at runtime.",
         ],
       },
@@ -842,7 +875,7 @@ component ClientOnly() client {
         items: [
           "No `vite-plugin-vesk` — `vesk dev` / `vesk build` are the build entry points; Tailwind ships as `@vesk/plugin-tailwind`.",
           "The deprecated `packages/runtime/src/track.ts` module is dead code — never import it; the active API lives in ripple-runtime.ts.",
-          "Server vs client exports are split: server-only APIs (cookies, headers, isr) are not in the client bundle; client-only APIs (hydrate, bindings, reconcile) are not in the server bundle.",
+          "Server vs client exports are split: server-only APIs (cookies, headers, isr) are not in the client bundle; client-only APIs (hydrate, bindings, reconcile) are not in the server bundle. Crossing the line is a compile-time boundary error, not a runtime one.",
         ],
       },
     ],
@@ -856,7 +889,7 @@ component ClientOnly() client {
     blocks: [
       {
         kind: "p",
-        text: "The compiler turns `.vsk` source into JavaScript targets from one intermediate representation: server codegen (SSR HTML) and client codegen (real DOM construction + hydration wiring). A native Kotlin path walks the same IR.",
+        text: "When you run `vesk build`, the compiler turns `.vsk` source into JavaScript targets from one intermediate representation: server codegen (SSR HTML) and client codegen (real DOM construction + hydration wiring). A native Kotlin path walks that same IR. Understanding the four stages matters when you're debugging why something renders the way it does, or extending the compiler itself.",
       },
       { kind: "h2", text: "Pipeline stages" },
       {
@@ -873,10 +906,10 @@ component ClientOnly() client {
       {
         kind: "list",
         items: [
-          "Statement mode and expression mode produce the same IR node types — `props.items.map(...)` and `for (...; key ...)` both become a MapRegion.",
-          "`isStaticIR(body)` decides whether a subtree is fully static; static components skip runtime effect wiring entirely.",
-          "User code in statement-mode bodies stays raw — unrecognized statements are preserved as RuntimeStatement and re-emitted verbatim.",
-          "There is no regex anywhere in parsing or codegen — tokenizer/character scans only.",
+          "Statement mode and expression mode produce the same IR node types — `props.items.map(...)` and `for (...; key ...)` both become a MapRegion, so optimizing either once optimizes both.",
+          "`isStaticIR(body)` decides whether a subtree is fully static; static components skip runtime effect wiring entirely and exist as markup only.",
+          "User code in statement-mode bodies stays raw — unrecognized statements are preserved as RuntimeStatement and re-emitted verbatim, never reinterpreted.",
+          "There is no regex anywhere in parsing or codegen — tokenizer/character scans only. All source transformation goes through the AST, so any new syntax is added in the parser and IR, not with string surgery.",
         ],
       },
     ],
@@ -890,14 +923,14 @@ component ClientOnly() client {
     blocks: [
       {
         kind: "p",
-        text: "The compiler IR is a typed class hierarchy in `packages/compiler/src/ir.ts`. It is ephemeral: created per compilation by ir-generator.ts, consumed immediately by the server and client codegen visitors. Nodes dispatch via `instanceof`.",
+        text: "The intermediate representation is where the compiler does its real thinking. Every `.vsk` file is lowered to a typed class hierarchy in `packages/compiler/src/ir.ts`; the server and client codegen visitors then walk that same tree — and so does the native Kotlin compiler. The IR is ephemeral: created per compilation by ir-generator.ts, consumed immediately, discarded. Nodes dispatch via `instanceof`, not string tags.",
       },
       { kind: "h2", text: "Root nodes" },
       {
         kind: "list",
         items: [
-          "IRRoot — components, imports, staticProps (hoisted `export const props = {...}`), loadFn, topLevelCode.",
-          "ComponentIR — name, paramNames, propsType, isClient, isAsync, ssrAwait, mode ('expression' | 'statement'), body, style, exported flags.",
+          "IRRoot — the whole compilation: components, imports, staticProps (hoisted `export const props = {...}`), loadFn, topLevelCode. One per compiled module.",
+          "ComponentIR — a single component: name, paramNames, propsType, isClient, isAsync, ssrAwait, mode ('expression' | 'statement'), body, style, exported flags. The body is a tree of the node types below.",
         ],
       },
       { kind: "h2", text: "Node types" },
@@ -924,9 +957,9 @@ component ClientOnly() client {
       {
         kind: "list",
         items: [
-          "Server walks nodes pushing HTML string chunks to an `__out` array; ServerBlock renders, ClientBlock returns ''.",
-          "Client walks nodes creating real DOM; ServerBlock returns null, ClientBlock renders.",
-          "In hydrate mode, `<!--vsk-->` claim markers precede subtrees that need client JS.",
+          "Server walks nodes pushing HTML string chunks to an `__out` array; ServerBlock renders, ClientBlock returns '' — so an island's markup survives and only its client-only parts disappear.",
+          "Client walks nodes creating real DOM; ServerBlock returns null, ClientBlock renders. The same tree drives both sides, with each node deciding what it contributes per target.",
+          "In hydrate mode, `<!--vsk-->` claim markers precede the subtrees that need client JS — the server tells the hydrator exactly where to attach behavior.",
         ],
       },
     ],
@@ -940,19 +973,23 @@ component ClientOnly() client {
     blocks: [
       {
         kind: "p",
-        text: "The client codegen distinguishes fully-static subtrees from reactive ones at compile time. Static subtrees are constructed once and never touched by effects; reactive subtrees get per-cell DOM update wiring.",
+        text: "The client bundle can't know at runtime which parts of a subtree will ever change — so the compiler decides at build time. Anything fully static — no bindings, no handlers — is constructed once and never touched again by effects. This page is that distinction, and how the server communicates it to the client.",
       },
       { kind: "h2", text: "isStaticIR" },
       {
         kind: "list",
         items: [
           "`isStaticIR(body)` returns true only when every node is a StaticNode or TextNode and no attribute binding (including on* handlers) is dynamic.",
-          "A component whose whole body is static gets no effect wiring — its DOM is built once, synchronously.",
-          "A component with a `<style>` block is never static.",
-          "A MapRegion counts as static only when both its template and alternate are static.",
+          "A component whose whole body is static gets no effect wiring — its DOM is built once, synchronously, then left alone.",
+          "A component with a `<style>` block is never static — the style is appended to the head at runtime and counts as work.",
+          "A MapRegion counts as static only when both its template and alternate (the empty branch) are static.",
         ],
       },
       { kind: "h2", text: "Hydrate-mode markers" },
+      {
+        kind: "p",
+        text: "The server emits numeric markers only where the client will need to do something. The rule that decides is the same one on both sides:",
+      },
       {
         kind: "code",
         filename: "subtreeNeedsJS",
@@ -961,15 +998,15 @@ component ClientOnly() client {
       {
         kind: "list",
         items: [
-          "Static subtrees: no marker, no client-side reconstruction — the server HTML is claimed as-is.",
+          "Static subtrees: no marker, no client-side reconstruction — the server HTML is claimed as-is and left to the browser's parser.",
           "Reactive subtrees: a `<!--vsk-->` marker tells the client hydrator where to attach effects and per-cell update code.",
-          "forceClaim forces a claim marker even for a static-looking subtree (e.g. event delegation).",
+          "forceClaim forces a claim marker even for a static-looking subtree (e.g. event delegation), so the client still gets a hook.",
         ],
       },
       { kind: "h2", text: "Static props" },
       {
         kind: "p",
-        text: "Module-level `export const props = { ... }` static data is hoisted into IRRoot.staticProps and re-emitted once, shared by server and client outputs instead of being re-evaluated per component.",
+        text: "Module-level `export const props = { ... }` static data is hoisted into IRRoot.staticProps and re-emitted exactly once, shared by the server and client outputs. Instead of re-evaluating the object per component instance, both sides read the same hoisted value — which keeps the shipped data identical between SSR HTML and the hydrated client.",
       },
     ],
   },
@@ -982,7 +1019,7 @@ component ClientOnly() client {
     blocks: [
       {
         kind: "p",
-        text: "\"Client reachability\" is the compiler's answer to: does this component need to exist on the client at all, and which parts of its body belong to which side? It is decided at compile time by three mechanisms.",
+        text: "\"Client reachability\" is the compiler's answer to two questions every component raises: does this component need to exist on the client at all, and which parts of its body belong to which side of the wire? Both are decided at compile time, by three mechanisms. The goal is the same: never ship JavaScript for a page that can't use it, and never guess where the server/client boundary lies at runtime.",
       },
       { kind: "h2", text: "Per-component island flag" },
       {
@@ -993,17 +1030,21 @@ component ClientOnly() client {
       {
         kind: "list",
         items: [
-          "A `client` island always needs client code — it renders on both server and client.",
-          "A non-client component needs client code only when its body is not fully static (reactive content, on* handlers, effects, bindings).",
-          "A module where every component is static and non-client compiles to an empty client bundle (compileClient returns '' unless forceClient: true).",
+          "A `client` island always needs client code — it renders on both server and client, so both sides have to know how to build its markup.",
+          "A non-client component needs client code only when its body is not fully static — reactive content, on* handlers, effects, bindings all count as needing the client.",
+          "A module where every component is static and non-client compiles to an empty client bundle (compileClient returns '' unless forceClient: true). Those pages fetch HTML and nothing else.",
         ],
       },
       { kind: "h2", text: "Per-block validation" },
       {
         kind: "p",
-        text: "`validateBlocks(compName, isClient, body)` enforces the boundary statically per component kind: a `client` component containing `{#server}` raises serverBlockInClient; a server component containing `{#client}` raises clientBlockInServer. The check recurses through StaticNode, ServerBlock and ClientBlock children, so the rules apply at any nesting depth.",
+        text: "`validateBlocks(compName, isClient, body)` enforces the boundary statically per component kind: a `client` component containing `{#server}` raises serverBlockInClient; a server component containing `{#client}` raises clientBlockInServer. The check recurses through StaticNode, ServerBlock and ClientBlock children, so the rules apply at any nesting depth — a `{#client}` buried five elements deep in a server component is still a compile error, not a surprise empty region in production.",
       },
       { kind: "h2", text: "Per-target stripping" },
+      {
+        kind: "p",
+        text: "The same IR node means opposite things to each codegen pass, and each side renders only its own:",
+      },
       {
         kind: "table",
         head: ["Node", "Server codegen", "Client codegen"],
@@ -1015,7 +1056,7 @@ component ClientOnly() client {
       { kind: "h2", text: "Client bundle" },
       {
         kind: "p",
-        text: "The browser bundle is built from the runtime's index-client barrel (tree-shaken to the names actually used) plus hydration entry points: hydrate, hydrateViewport, hydrateIdle, hydrateOnInteraction, needsHydration, createHydrateWalker, collectVskMarkers, reactiveProps. In code-split mode it is split into per-route `page-<name>.js` chunks.",
+        text: "The browser bundle is built from the runtime's index-client barrel — tree-shaken down to the names actually used, so you never ship the whole runtime — plus the hydration entry points: hydrate, hydrateViewport, hydrateIdle, hydrateOnInteraction, needsHydration, createHydrateWalker, collectVskMarkers, reactiveProps. In code-split mode it is split into per-route `page-<name>.js` chunks, so each page loads only the navigation it actually needs.",
       },
     ],
   },
@@ -1028,7 +1069,7 @@ component ClientOnly() client {
     blocks: [
       {
         kind: "p",
-        text: "Vesk provides structured error types for common failure scenarios.",
+        text: "Errors are only as good as the signal they carry. `VeskError` is the compiler's structured error type — a stable code, file/line/column, and a suggested fix. `HttpError`, `TimeoutError`, and `NotFoundError` are the runtime's way of telling you the network failed or the page doesn't exist. Reach for them any time a fetch or a route can fail in a way a user will actually hit.",
       },
       { kind: "h2", text: "VeskError" },
       {
@@ -1048,8 +1089,8 @@ throw new VeskError({
       {
         kind: "list",
         items: [
-          "Every VeskError carries a stable V-code, message, file, line, column and a suggested help line.",
-          "`codeFrame()` returns a formatted code frame with the caret pointing at the problem.",
+          "Every VeskError carries a stable V-code, message, file, line, column and a suggested help line — so a failing build tells you both what's wrong and where to look.",
+          "`codeFrame()` returns a formatted code frame with the caret pointing at the problem, for the terminal and for the LSP's inline diagnostics.",
         ],
       },
       { kind: "h2", text: "Runtime error types" },
@@ -1061,6 +1102,10 @@ throw new VeskError({
           ["TimeoutError", "timeout (ms)", "Request exceeded its timeout"],
           ["NotFoundError", "—", "notFound(); renders not-found.vsk"],
         ],
+      },
+      {
+        kind: "p",
+        text: "Used together they give a route a complete failure vocabulary: 404 means \"you asked for something that isn't there\" (and renders `not-found.vsk`), 504 means \"upstream took too long\", and anything 4xx/5xx is an `HttpError` you can branch on.",
       },
       { kind: "h2", text: "In components" },
       {
@@ -1089,6 +1134,10 @@ throw new VeskError({
 }`,
           },
         ],
+      },
+      {
+        kind: "p",
+        text: "A `try { } catch (err) { }` around markup is a first-class region in both body modes: it renders the fallback content when the wrapped components throw. That's your component-level safety net — keep it around anything that can fail at render time.",
       },
       { kind: "h2", text: "In server code" },
       {
@@ -1120,7 +1169,7 @@ throw new VeskError({
     blocks: [
       {
         kind: "p",
-        text: "Hydration attaches client behavior (event handlers, effects, tracked bindings) to server-rendered HTML. The server marks the parts of the DOM that need client JS; the client hydrator walks those markers and claims the existing DOM instead of rebuilding it.",
+        text: "Hydration is how Vesk attaches client behavior — event handlers, effects, tracked bindings — to HTML the server already sent. The crucial move is *not* rebuilding the DOM: the server marks the parts of the DOM that need client JS, and the client hydrator walks those markers and claims the existing DOM in place. Rebuilding would flash the page and waste the server render; claiming keeps it seamless.",
       },
       { kind: "h2", text: "Server side" },
       {
@@ -1131,12 +1180,16 @@ throw new VeskError({
       {
         kind: "list",
         items: [
-          "Fully static subtrees get no marker and no client-side reconstruction.",
-          "Reactive subtrees get a `<!--vsk-->` marker; the hydrator claims them in place.",
-          "Event-handler attributes are excluded from the SSR HTML entirely — the client bundle attaches them.",
+          "Fully static subtrees get no marker and no client-side reconstruction — the browser keeps the HTML as the parser laid it down.",
+          "Reactive subtrees get a `<!--vsk-->` marker; the hydrator claims them in place and wires up the per-cell update code.",
+          "Event-handler attributes are excluded from the SSR HTML entirely — the client bundle attaches them, so the markup is clean and the handlers land exactly where the markers say.",
         ],
       },
       { kind: "h2", text: "Client entry points" },
+      {
+        kind: "p",
+        text: "You rarely hydrate everything at once. These entry points let the page match its cost to what the user is doing:",
+      },
       {
         kind: "table",
         head: ["Entry", "Behavior"],
@@ -1151,7 +1204,7 @@ throw new VeskError({
       },
       {
         kind: "p",
-        text: "Automated hydration uses `hydrateViewport` by default; `createHydrateWalker(container, markerList?)` walks from markers or from the container, and `reactiveProps(props)` makes server-rendered prop values reactive on the client.",
+        text: "Automated hydration uses `hydrateViewport` by default — the fold reacts instantly, the rest after scroll. `createHydrateWalker(container, markerList?)` walks from a marker list or from the container itself, and `reactiveProps(props)` turns the server-rendered prop values into reactive cells on the client so a hydration doesn't lose the tracked-ness of the initial state.",
       },
     ],
   },
@@ -1164,7 +1217,7 @@ throw new VeskError({
     blocks: [
       {
         kind: "p",
-        text: "Vesk provides structured data (JSON-LD) components for search engine optimization. All auto-imported from `@vesk/runtime`.",
+        text: "Say you have a blog post or a product page and you want it to show up as a rich result — a headline, a date, an author, a breadcrumb trail. Search engines read that from structured data embedded in the page. Vesk's `JsonLd` component renders a `<script type=\"application/ld+json\">` tag, and a set of schema generators build the right shape for you. All auto-imported from `@vesk/runtime`.",
       },
       { kind: "h2", text: "JsonLd component" },
       {
@@ -1203,16 +1256,20 @@ throw new VeskError({
         ],
       },
       {
+        kind: "p",
+        text: "The pattern is: render the page normally, and drop a `<JsonLd>` nearby with the metadata that search engines care about. The data is computed from the same props the visible content uses, so the structured data and the page can't drift.",
+      },
+      {
         kind: "list",
         items: [
-          "Renders a `<script type=\"application/ld+json\">` tag with the structured data.",
+          "Renders a `<script type=\"application/ld+json\">` tag with the structured data — a snippet search engines can read without executing any JavaScript.",
           "Schema generators return Record<string, unknown> objects with @type set: ArticleSchema, ProductSchema, FAQPageSchema, BreadcrumbListSchema, OrganizationSchema, LocalBusinessSchema, VideoSchema.",
         ],
       },
       {
         kind: "note",
         tone: "info",
-        text: "`vesk seo` runs the SEO audit against app/ (RouteOutput checks); pass `--strict` to make audit errors fail the build or exit non-zero.",
+        text: "`vesk seo` runs the SEO audit against app/ (RouteOutput checks); pass `--strict` to make audit errors fail the build or exit non-zero. It's the closest thing to a CI gate for the basics — titles, descriptions, structured data — before a page ships.",
       },
     ],
   },
@@ -1225,7 +1282,7 @@ throw new VeskError({
     blocks: [
       {
         kind: "p",
-        text: "Vesk provides utilities for two-way data binding between reactive cells and DOM form elements. All auto-imported from `@vesk/runtime`.",
+        text: "State in a cell, value in an input — keeping those two in sync by hand means writing an input listener, a write-back, and a cleanup every single time. `bindValue`, `bindChecked`, and `bindGroup` wire a tracked cell to a DOM form element so the whole connection is one line. All auto-imported from `@vesk/runtime`. That's the round trip for a checkout form or a settings page: type, cell updates, DOM already current.",
       },
       { kind: "h2", text: "bindValue" },
       {
@@ -1235,7 +1292,7 @@ throw new VeskError({
             label: "statement mode",
             filename: "app/components/NameInput.vsk",
             code: `component NameInput() {
-  let &[name] = track('');
+  const &[name] = track('');
   <input value={name} ref={bindValue(name)} />
 }`,
           },
@@ -1243,22 +1300,30 @@ throw new VeskError({
             label: "expression mode",
             filename: "app/components/NameInput.vsk",
             code: `component NameInput() {
-  let &[name] = track('');
+  const &[name] = track('');
   return <input value={name} ref={bindValue(name)} />;
 }`,
           },
         ],
       },
       {
+        kind: "p",
+        text: "The ref is where the wiring happens: bindValue reads the cell once to seed the element's value, then writes the cell back on input/change. The `value={name}` side keeps programmatic updates flowing the other way.",
+      },
+      {
         kind: "list",
         items: [
           "Reads the cell and sets the element's value; on input/change writes back.",
           "Handles `<input>` and `<select>` (including multiple); type=\"number\" and type=\"range\" coerce to numbers.",
-          "Accepts a custom setter: `bindValue(count, (val) => Math.max(0, Number(val)))`.",
+          "Accepts a custom setter: `bindValue(count, (val) => Math.max(0, Number(val)))` — useful for clamping or sanitizing what's written back to the cell.",
           "Returns a cleanup function, run when the element unmounts.",
         ],
       },
       { kind: "h2", text: "bindChecked / bindGroup" },
+      {
+        kind: "p",
+        text: "Checkboxes and radio groups need the same two-way wiring, but with a bit more shape: `bindChecked` owns a single checkbox's `checked` property, and `bindGroup` makes a whole radio group share one cell:",
+      },
       {
         kind: "tabs",
         tabs: [
@@ -1266,7 +1331,7 @@ throw new VeskError({
             label: "statement mode",
             filename: "app/components/ColorPicker.vsk",
             code: `component ColorPicker() {
-  let &[color] = track('blue');
+  const &[color] = track('blue');
 
   <div>
     <label><input type="radio" value="red" ref={bindGroup(color)} /> Red</label>
@@ -1278,7 +1343,7 @@ throw new VeskError({
             label: "expression mode",
             filename: "app/components/ColorPicker.vsk",
             code: `component ColorPicker() {
-  let &[color] = track('blue');
+  const &[color] = track('blue');
 
   return (
     <div>
@@ -1299,6 +1364,10 @@ throw new VeskError({
           ["bindGroup(cell, setFn?)", "<input type=\"radio\">, checkbox", "group value"],
         ],
       },
+      {
+        kind: "p",
+        text: "Each binding returns a cleanup function that runs on unmount, so tearing the element down never leaks a subscription.",
+      },
     ],
   },
   {
@@ -1310,7 +1379,7 @@ throw new VeskError({
     blocks: [
       {
         kind: "p",
-        text: "Vesk ships several built-in components, all auto-imported from `@vesk/runtime`.",
+        text: "A handful of components ship with the runtime that don't map onto ordinary markup — they solve cross-cutting problems: images that behave, portals, A/B tests, and a page-navigation progress bar. They're used like normal JSX tags and are all auto-imported from `@vesk/runtime`.",
       },
       { kind: "h2", text: "Image" },
       {
@@ -1337,7 +1406,7 @@ throw new VeskError({
       {
         kind: "list",
         items: [
-          "Teleports children to another DOM node by CSS selector or element.",
+          "Teleports children to another DOM node by CSS selector or element — the standard escape hatch for modals and tooltips that need to break out of an overflow: hidden parent.",
           "SSR returns an empty string — client-only.",
         ],
       },
@@ -1377,13 +1446,13 @@ throw new VeskError({
       {
         kind: "p",
         text:
-          "Vesk provides headless render helpers — `Show`, `For`, `Switch`, `Match` — for conditional rendering, list rendering, and pattern matching. They are composable building blocks with no markup and no styling, and they are **auto-imported** from `@vesk/runtime` (no import statement needed).",
+          "Sometimes you need conditional or list rendering in a spot where statements can't reach — inside a `return (...)`, inside `{...}` interpolation, or as an argument to `.map()`. That's the problem the headless components solve: `Show`, `For`, `Switch`, `Match` are composable render helpers with no markup and no styling, and they are **auto-imported** from `@vesk/runtime` (no import statement needed).",
       },
       { kind: "h2", text: "Why headless components exist alongside native statements" },
       {
         kind: "p",
         text:
-          "Vesk has two rendering systems that overlap in purpose but differ in where they can appear. Understanding the difference is the key to picking the right one.",
+          "Vesk has two rendering systems that overlap in purpose but differ in where they can appear. Understanding the difference is the key to picking the right one, and it's simpler than it looks once you separate statement position from expression position.",
       },
       {
         kind: "p",
@@ -1392,7 +1461,7 @@ throw new VeskError({
       {
         kind: "p",
         text:
-          "The compiler lowers statement-mode `if`, `for...of`, `switch`, and `while` directly into reactive IR. They are always available — no import, no helper, no ceremony. They are the **default** way to render in a component body.",
+          "The compiler lowers statement-mode `if`, `for...of`, `switch`, and `while` directly into reactive IR. They are always available — no import, no helper, no ceremony — and they're the **default** way to render inside a component body.",
       },
       {
         kind: "list",
@@ -1414,7 +1483,7 @@ throw new VeskError({
       {
         kind: "p",
         text:
-          "Headless components are JSX tags. They work **wherever a JSX tag works** — inside `return (...)`, inside `{...}` interpolation, inside `.map()` callbacks, as children of other components, or as standalone statement-mode JSX. They are values, not control flow.",
+          "Headless components are JSX tags. They work **wherever a JSX tag works** — inside `return (...)`, inside `{...}` interpolation, inside `.map()` callbacks, as children of other components, or as standalone statement-mode JSX. They are values, not control flow: the conditional or loop is a thing you can put anywhere a component can go.",
       },
       {
         kind: "list",
@@ -1444,13 +1513,13 @@ throw new VeskError({
       {
         kind: "p",
         text:
-          "Both forms compile to the same rendering. Pick whichever reads more naturally in the surrounding code.",
+          "Both forms compile to the same rendering. Pick whichever reads more naturally in the surrounding code — a statement body reads like a script, an expression body reads like a value.",
       },
       { kind: "h2", text: "Show" },
       {
         kind: "p",
         text:
-          "`Show` renders its children when `when` is truthy, otherwise its `fallback`. The `fallback` is a string, a JSX element, or omitted (`null`).",
+          "`Show` renders its children when `when` is truthy, otherwise its `fallback`. The `fallback` is a string, a JSX element, or omitted (`null`). It's the headless version of a ternary that doesn't nest.",
       },
       {
         kind: "tabs",
@@ -1481,7 +1550,7 @@ throw new VeskError({
       {
         kind: "p",
         text:
-          "`For` takes an `each` list and a `children` render function `(item, index) => vnode`. In `.vsk`, JSX render-function children (`{(item, i) => ...}` directly inside the tag) do **not** compile — prefer the native `for...of ; key` loop for list rendering. The `for...of` form compiles to keyed reconciliation and reads like plain JavaScript.",
+          "`For` takes an `each` list and a `children` render function `(item, index) => vnode`. In `.vsk`, JSX render-function children (`{(item, i) => ...}` directly inside the tag) do **not** compile — prefer the native `for...of ; key` loop for list rendering. The `for...of` form compiles to keyed reconciliation and reads like plain JavaScript, so it's both the supported path and the easier one to read.",
       },
       {
         kind: "tabs",
@@ -1519,13 +1588,13 @@ component TodoList(props: { items: Todo[] }) {
         kind: "note",
         tone: "warn",
         text:
-          "The `; key` clause you see in the statement-mode example is a Vesk extension and is covered on the List Rendering page. It compiles to keyed DOM reconciliation — adding, removing, and reordering elements without re-rendering the whole list.",
+          "The `; key` clause you see in the statement-mode example is a Vesk extension, covered on the List Rendering page. Use it for anything ordered or reordered: it compiles to keyed DOM reconciliation — adding, removing, and reordering elements without re-rendering the whole list — which is what keeps long lists fast.",
       },
       { kind: "h2", text: "Switch / Match" },
       {
         kind: "p",
         text:
-          "`<Switch>` returns the first child that renders non-empty; `<Match when=...>` renders its children only when `when` is truthy, and a `<Match fallback>` matches the default arm. This is the expression-position analogue of a `switch` with `default`, useful when a ternary would nest.",
+          "`<Switch>` returns the first child that renders non-empty; `<Match when=...>` renders its children only when `when` is truthy, and a `<Match fallback>` matches the default arm. This is the expression-position analogue of a `switch` with `default` — the tool for a three-or-more-way branch that would be unreadable as nested ternaries. Here it powers a status badge that changes color per order state:",
       },
       {
         kind: "tabs",
@@ -1579,36 +1648,36 @@ component TodoList(props: { items: Todo[] }) {
     blocks: [
       {
         kind: "p",
-        text: "The runtime reactivity engine implements tracked cells, derived values, effects, and a block-tree scheduler. (The legacy `track.ts` module is dead code and must not be imported.)",
+        text: "The Reactivity page is what you write; this is what actually runs beneath it: tracked cells, derived values, effects, and a block-tree scheduler that decides what flushes when. Most apps never touch these internals directly — but when a list update lands in the wrong order or an effect loops, this is where the reason lives. (The legacy `track.ts` module is dead code and must not be imported.)",
       },
       { kind: "h2", text: "Cells" },
       {
         kind: "list",
         items: [
           "`track(value)` creates a tracked cell. Reads register a dependency on the active reaction; writes mark the owning block dirty and schedule it.",
-          "`untrack(fn)` runs fn with tracking disabled; `peek(cell)` reads without registering a dependency.",
-          "`derived(fn)` is a computed cell: fn runs under an effect and its result is written to the derived cell. Mutating tracked state inside a derived evaluation is forbidden.",
+          "`untrack(fn)` runs fn with tracking disabled; `peek(cell)` reads without registering a dependency. Both are for the cases where a read is a side effect you don't want to subscribe to.",
+          "`derived(fn)` is a computed cell: fn runs under an effect and its result is written to the derived cell. Mutating tracked state inside a derived evaluation is forbidden — a derived is expected to be a pure function of its inputs.",
         ],
       },
       { kind: "h2", text: "Scheduler" },
       {
         kind: "list",
         items: [
-          "Default mode is microtask-batched: writes enqueue `queueMicrotask(flush_microtasks)`, and one flush runs all queued root blocks.",
+          "Default mode is microtask-batched: writes enqueue `queueMicrotask(flush_microtasks)`, and one flush runs all queued root blocks. Ten writes in one click still cost exactly one flush.",
           "More than 1001 consecutive flush rounds throw \"Maximum update depth exceeded\" — the effect read-write loop guard.",
-          "`flushSync(fn)` switches to synchronous scheduling while fn runs; `tick()` resolves on the next requestAnimationFrame.",
-          "Low-level control: `schedule_update`, `queue_microtask` are exported.",
+          "`flushSync(fn)` switches to synchronous scheduling while fn runs; `tick()` resolves on the next requestAnimationFrame. The two escapes for coordinating with code that can't wait for the microtask queue.",
+          "Low-level control: `schedule_update`, `queue_microtask` are exported for the codegen and for advanced consumers.",
         ],
       },
       { kind: "h2", text: "Blocks" },
       {
         kind: "p",
-        text: "Every component body and effect compiles to a block in a doubly-linked tree: render blocks, branch blocks, effect blocks, user effects, pre-effects, root blocks and try blocks. `destroy_block(pause/resume)`, `pause_block`, `is_destroyed`, and `on_destroy(fn)` manage lifecycle.",
+        text: "Every component body and effect compiles to a block in a doubly-linked tree: render blocks, branch blocks, effect blocks, user effects, pre-effects, root blocks and try blocks. The tree is what makes scoped updates possible — a write to a cell knows which block owns it and walks only the affected branches. `destroy_block(pause/resume)`, `pause_block`, `is_destroyed`, and `on_destroy(fn)` manage the lifecycle: tearing a component down destroys its blocks and runs their cleanups.",
       },
       { kind: "h2", text: "Scoped flushing" },
       {
         kind: "p",
-        text: "Each cell records its owning block. When a block reads a cell owned by another block the flush is scoped, unless the owner is not an ancestor (the `disable_scoped_flush` guard).",
+        text: "Each cell records its owning block. When a block reads a cell owned by another block the flush is scoped — it can update just that owner and the blocks between them — unless the owner is not an ancestor, in which case the `disable_scoped_flush` guard falls back to a full flush so a cross-branch dependency still updates correctly.",
       },
     ],
   },
@@ -1621,7 +1690,7 @@ component TodoList(props: { items: Todo[] }) {
     blocks: [
       {
         kind: "p",
-        text: "Vesk provides `reconcile` for efficient keyed list updates without a virtual DOM. It operates directly on the real DOM using comment markers.",
+        text: "Keyed list updates — items arrive from a server, some change, the order shifts — are where naive re-rendering falls apart. `reconcile` patches the real DOM directly: it diffs keys between the old and new lists and applies the smallest set of DOM moves. No virtual DOM, no tree diff — just comment markers as boundaries and the nodes between them.",
       },
       { kind: "h2", text: "reconcile" },
       {
@@ -1644,18 +1713,22 @@ const update = reconcile(
 update(newItems);      // efficient patch
 update([]);            // clear the list`,
       },
+      {
+        kind: "p",
+        text: "You give it the two comment markers that fence the list region, the current item array, a key function, and a function that builds one element. The returned `update` function then takes a new array and reconciles it in place.",
+      },
       { kind: "h2", text: "How it works" },
       {
         kind: "list",
         items: [
-          "Comment markers (`<!--k:key-->`) are inserted as boundaries.",
-          "On update, the reconciler diffs keys: matching keys reuse DOM nodes, new keys create them, removed keys destroy their blocks, reordered keys move nodes.",
-          "It diffs keys, not content — O(n) for the common case.",
+          "Comment markers (`<!--k:key-->`) are inserted as boundaries, so the reconciler always knows exactly where a list starts and ends in the live DOM.",
+          "On update, the reconciler diffs keys: matching keys reuse DOM nodes, new keys create them, removed keys destroy their blocks, reordered keys move nodes. Content is never rebuilt from scratch.",
+          "It diffs keys, not content — O(n) for the common case, which is what keeps long lists cheap to update.",
         ],
       },
       {
         kind: "p",
-        text: "The `For` headless component and statement-mode `for` loops both compile to keyed reconciliation; you typically don't call `reconcile` directly.",
+        text: "The `For` headless component and statement-mode `for` loops both compile to keyed reconciliation; you typically don't call `reconcile` directly. This is the function underneath them, and the escape hatch if you're managing a list outside of a component body.",
       },
     ],
   },
@@ -1668,7 +1741,7 @@ update([]);            // clear the list`,
     blocks: [
       {
         kind: "p",
-        text: "Vesk builds one SSR function and one client bundle; how they are served depends on the target platform. The default is a standard Node.js server; `vesk build --platform <name>` switches the output shape.",
+        text: "`vesk build` produces one SSR function and one client bundle. What a deploy actually looks like — a long-running Node process, a serverless function, an edge worker — depends on the platform target you build for. The default is a standard Node.js server: local `vesk start` and your VPS both do the same thing.",
       },
       { kind: "h2", text: "Platforms" },
       {
@@ -1685,6 +1758,10 @@ update([]);            // clear the list`,
       },
       { kind: "h2", text: "SSR rendering" },
       {
+        kind: "p",
+        text: "The same component model renders identically on every platform, because the server codegen is platform-independent. What it does and doesn't put in the HTML:",
+      },
+      {
         kind: "list",
         items: [
           "Rendered server-side: static HTML, dynamic interpolation, conditionals, .map()/for lists, child component HTML, {#server} blocks, styles.",
@@ -1696,7 +1773,7 @@ update([]);            // clear the list`,
       { kind: "h2", text: "Browser" },
       {
         kind: "p",
-        text: "The client bundle is built from the compiled client codegen plus the runtime's index-client barrel, tree-shaken to the exports actually used, with hydration entry points (hydrate, hydrateViewport, hydrateIdle, hydrateOnInteraction, needsHydration, createHydrateWalker, collectVskMarkers, reactiveProps).",
+        text: "The client bundle is built from the compiled client codegen plus the runtime's index-client barrel, tree-shaken to the exports actually used, with the hydration entry points (hydrate, hydrateViewport, hydrateIdle, hydrateOnInteraction, needsHydration, createHydrateWalker, collectVskMarkers, reactiveProps). A page that only renders static content ships an empty bundle; a page with one island ships exactly the code that island needs.",
       },
     ],
   },
@@ -1709,14 +1786,14 @@ update([]);            // clear the list`,
     blocks: [
       {
         kind: "p",
-        text: "`@vesk/lsp` provides Language Server Protocol support for `.vsk` files, enabling editor features like autocomplete, diagnostics, and go-to-definition.",
+        text: "Editing `.vsk` shouldn't feel like writing blind. `@vesk/lsp` speaks the Language Server Protocol, so your editor gets the same compiler knowledge `vesk typecheck` uses — inline diagnostics, autocomplete, type info on hover, and jumps across files. Any LSP-capable editor can connect over stdio.",
       },
       { kind: "h2", text: "Features" },
       {
         kind: "list",
         items: [
           "Syntax highlighting — .vsk files are recognized as a TypeScript superset with JSX/TSX grammar.",
-          "Diagnostics — compiler errors reported inline in the editor.",
+          "Diagnostics — compiler errors reported inline in the editor, same as a failed `vesk typecheck` run.",
           "Autocomplete — component names, auto-imported runtime APIs (track, effect, derived), props on known components, CSS class names with the Tailwind plugin.",
           "Go to definition, hover type info, and find references.",
         ],
@@ -1725,8 +1802,8 @@ update([]);            // clear the list`,
       {
         kind: "list",
         items: [
-          "The LSP wraps the compiler's vskToTsx transform to convert .vsk files to standard TypeScript for the editor.",
-          "Diagnostics come from the same pipeline that `vesk typecheck` uses.",
+          "The LSP wraps the compiler's vskToTsx transform to convert .vsk files to standard TypeScript for the editor — so the editor sees real types, not a bespoke language of its own.",
+          "Diagnostics come from the same pipeline that `vesk typecheck` uses, so the editor and the CLI can never disagree about what's an error.",
           "Auto-import suggestions come from the VESK_BUILTINS list in the compiler.",
           "Setup: add `\"*.vsk\": \"typescriptreact\"` to VS Code file associations; any LSP editor can connect over stdio.",
         ],
@@ -1742,7 +1819,7 @@ update([]);            // clear the list`,
     blocks: [
       {
         kind: "p",
-        text: "`@vesk/prettier-plugin` provides formatting support for `.vsk` files in Prettier.",
+        text: "Consistent formatting across a team starts with everyone running the same formatter. `@vesk/prettier-plugin` makes `.vsk` a first-class Prettier citizen while preserving the syntax Prettier's parser doesn't know about — `component`, `&[]`, `{#client}`/`{#server}` — so three-space or one-line debates never have to happen again.",
       },
       { kind: "h2", text: "Setup" },
       {
@@ -1763,11 +1840,11 @@ update([]);            // clear the list`,
         items: [
           "Registers .vsk as a handled extension.",
           "Transforms .vsk syntax to TypeScript/JSX for Prettier's parser, formats, then maps back.",
-          "Vesk-specific syntax (`component`, `&[]`, `{#client}`/`{#server}`) is preserved through the format pass.",
+          "Vesk-specific syntax (`component`, `&[]`, `{#client}`/`{#server}`) is preserved through the format pass — you get consistent formatting without ever re-learning how the special syntax is written.",
         ],
       },
     ],
-  }
+  },
 ];
 
 const extendedPages: DocPage[] = [

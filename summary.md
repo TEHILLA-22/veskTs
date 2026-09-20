@@ -6,7 +6,7 @@
 
 ## Final state (this box is a codespace, not the termux device)
 
-- `npm run typecheck` clean. `node scripts/test.js` → **79 files, 2848 passed, 0 failed, exit 0**.
+- `npm run typecheck` clean. `node scripts/test.js` → **79 files, 2848 passed, 0 failed, exit/0**.
 - `tests/hydration-test.mjs` → **434/434** (incl. new TEST 24 + TEST 18 portal entries re-added).
 - No termux chromium here — `CHROMIUM_PATH=/tmp/opencode/chrome/chrome-headless-shell/linux-153.0.8010.52/chrome-headless-shell-linux64/chrome-headless-shell` (installed via `npx @puppeteer/browsers install chrome-headless-shell@stable`). production-hydration + code-split E2E pass with it.
 - Servers running: `:3000`/`:3100` (test-app), `:4000` (vesk-doc), all 200.

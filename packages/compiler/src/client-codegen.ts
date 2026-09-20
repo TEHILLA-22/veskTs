@@ -2188,14 +2188,19 @@ export function compileClient(source: string, _componentName: string | null, opt
  * `resolveComponentName`, so callers don't need a second full parse just
  * to learn the name.
  */
-export function compileClientBoth(source: string, _componentName: string | null, sourcePath?: string): { comp: string; hyd: string; name: string | null } {
+export function compileClientBoth(
+  source: string,
+  _componentName: string | null,
+  sourcePath?: string,
+  opts?: { skipHyd?: boolean },
+): { comp: string; hyd: string; name: string | null } {
   const ast = parse(source, sourcePath ? { filename: sourcePath } : {});
   // Downstream type-stripping mutates AST nodes in place (stripTsTypes),
   // so each emit mode needs its own tree. Cloning is far cheaper than the
   // second full acorn+TS parse this replaces.
-  const hydAst = structuredClone(ast);
+  const hydAst = opts?.skipHyd ? null : structuredClone(ast);
   const ir = generateIR(ast, source, sourcePath);
-  const irHyd = generateIR(hydAst, source, sourcePath);
+  const irHyd = opts?.skipHyd ? null : generateIR(hydAst!, source, sourcePath);
   const defaultComp = ir.components.find((c) => c.defaultExport);
   let name: string | null = null;
   if (defaultComp) name = defaultComp.name;
@@ -2207,9 +2212,11 @@ export function compileClientBoth(source: string, _componentName: string | null,
   // Comp and hyd land in the same scoped file block, so they share one
   // allocator: hyd continues after the names comp already consumed.
   const alloc = nameAllocFor(sourcePath);
+  const comp = emitClientFromIR(ir, { forceClient: true, nameAllocator: alloc });
+  if (opts?.skipHyd) return { comp, hyd: '', name };
   return {
-    comp: emitClientFromIR(ir, { forceClient: true, nameAllocator: alloc }),
-    hyd: emitClientFromIR(irHyd, { forceClient: true, hydrate: true, includeTopLevel: false, nameAllocator: alloc }),
+    comp,
+    hyd: emitClientFromIR(irHyd!, { forceClient: true, hydrate: true, includeTopLevel: false, nameAllocator: alloc }),
     name,
   };
 }

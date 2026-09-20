@@ -17,7 +17,7 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "The `vesk` CLI orchestrates the compiler, adapter, and runtime. Every command except `init` and `--help` operates on the current directory and requires an `app/` directory (except `start`, which requires a previous `vesk build`). Scaffolding is separate: `npx create-vesk@latest <project-name>`.",
+        text: "The `vesk` CLI is the whole toolchain in one binary: it runs the compiler, drives the adapter, and boots the runtime. You never juggle a bundler and a dev server and a typechecker separately — `vesk dev` compiles on request, `vesk build` emits a deployable `.vesk/` folder, `vesk start` serves it in production mode. Every command except `init` and `--help` operates on the current directory and requires an `app/` directory (except `start`, which requires a previous `vesk build`). Scaffolding is separate: `npx create-vesk@latest <project-name>`.",
       },
       {
         kind: "code",
@@ -37,7 +37,76 @@ Usage:
 
 Scaffolding:  npx create-vesk@latest <project-name>`,
       },
+      { kind: "h2", text: "A typical session" },
+      {
+        kind: "p",
+        text: "Here is the whole loop, start to finish, the way it actually runs. Scaffold a project, sit in the dev server for a while, ship it, run it. You don't need to memorize the rest of this page to be productive; the reference tables below are for the moment a flag does something surprising.",
+      },
+      {
+        kind: "code",
+        filename: "terminal",
+        language: "bash",
+        code: `$ npx create-vesk@latest my-store
+  scaffolded my-store
+
+$ cd my-store
+$ vesk dev
+  dev server at http://localhost:3000 (listening on 127.0.0.1)
+  /Users/you/my-store
+  3 pages: /, /pricing, /blog/[slug]
+  1 api route (app/api)
+  hmr enabled — edit app/ to hot reload`,
+      },
+      {
+        kind: "p",
+        text: "The dev server compiles each route on request, so the moment you hit http://localhost:3000 the HTML is fresh. Now change a component — say the tagline on the home page — and watch the log: the edit is debounced (12 ms), the component is recompiled, and a hot-swap message is pushed over WebSocket instead of a page reload.",
+      },
+      {
+        kind: "code",
+        filename: "terminal",
+        language: "bash",
+        code: `# edit app/index.vsk in your editor…
+  rebuilt (app/index.vsk) — 23ms
+  dev server at http://localhost:3000 (listening on 127.0.0.1)
+  [update] 1 component hot-swapped, no reload — app still open in the browser`,
+      },
+      {
+        kind: "p",
+        text: "When you're a full-time builder the loop is: `vesk typecheck` to catch type drift, `vesk seo` to keep the audit green, then `vesk build` and `vesk start` for the production pair. Notice the defaults doing the right thing — strict typing on, loopback bind by default, platform auto-detected from CI.",
+      },
+      {
+        kind: "code",
+        filename: "terminal",
+        language: "bash",
+        code: `$ vesk typecheck
+  vesk typecheck: no type errors found (2 warning(s))
+
+$ vesk seo --strict
+  vesk seo-audit: 3 pages — 0 errors, 1 warnings [PASS_WARN]
+
+$ vesk build --platform vercel
+  vesk build: output → .vesk
+  vesk build: ssr  → server/functions/index.js  (/)
+  vesk build: ssr  → server/functions/pricing.js  (/pricing)
+  vesk build: client → static/client.js  (48213 bytes, tree-shaken)
+  vesk build: css  → static/global.css  (19402 bytes)
+  vesk build: vercel → .vercel/output (symlink)
+  vesk build: done (.vesk)
+
+$ vesk start
+  vesk start: serving from .vesk
+  vesk production server at http://localhost:3000 (listening on 127.0.0.1)`,
+      },
+      {
+        kind: "note",
+        tone: "warn",
+        text: "`vesk start` requires a build: running it on a fresh checkout prints `vesk start: no build found at .vesk` and `Run \"vesk build\" first`, then exits with status 1. In CI, always build before you start.",
+      },
       { kind: "h2", text: "Commands" },
+      {
+        kind: "p",
+        text: "The complete command surface. Ports and hosts repeat across the server commands, so they're spelled out once here: `-p`/`--port`/`--port=<n>` picks the port (default 3000), `-H`/`--host` the bind address (default 127.0.0.1 — exposing a server on all interfaces is an explicit `--host 0.0.0.0`).",
+      },
       {
         kind: "table",
         head: ["Command", "Flags", "Behavior"],
@@ -54,7 +123,7 @@ Scaffolding:  npx create-vesk@latest <project-name>`,
       { kind: "h2", text: "Config loading" },
       {
         kind: "p",
-        text: "`loadConfig(projectDir)` runs for `dev` and `build`. Order matters: environment files load first, then the config file, then normalization and validation.",
+        text: "`loadConfig(projectDir)` runs for `dev` and `build`. Order matters, and it's the same order every time: environment files load first so the config can see them, then the config file is read and transpiled, then normalization and validation turn it into the object the build actually uses.",
       },
       {
         kind: "list",
@@ -70,7 +139,7 @@ Scaffolding:  npx create-vesk@latest <project-name>`,
       { kind: "h2", text: "vesk dev" },
       {
         kind: "p",
-        text: "`vesk dev` starts a per-request-compile dev server with WebSocket HMR. It binds to `127.0.0.1` by default — exposing it on all interfaces is an explicit opt-in (`--host 0.0.0.0`). NODE_ENV is set to `development` if unset.",
+        text: "`vesk dev` starts a per-request-compile dev server with WebSocket HMR — the compiler runs on demand for the route you're looking at, not eagerly for the whole tree. It binds to `127.0.0.1` by default; exposing it on all interfaces is an explicit opt-in (`--host 0.0.0.0`). NODE_ENV is set to `development` if unset.",
       },
       {
         kind: "list",
@@ -91,7 +160,7 @@ Scaffolding:  npx create-vesk@latest <project-name>`,
       },
       {
         kind: "p",
-        text: "A request with the `x-vesk-data: 1` header triggers the data phase only: the route is matched and its page/layout chain is rendered, but the response is JSON instead of HTML. Successful responses carry `Cache-Control: no-store`, `Vary: x-vesk-data`, and the security headers.",
+        text: "`x-vesk-data: 1` is the data-phase flag the SPA router and prefetchers use to fetch just the route's data, not the document. A request with this header triggers the data phase only: the route is matched and its page/layout chain is rendered, but the response is JSON instead of HTML. Successful responses carry `Cache-Control: no-store`, `Vary: x-vesk-data`, and the security headers.",
       },
       {
         kind: "code",
@@ -108,7 +177,7 @@ Scaffolding:  npx create-vesk@latest <project-name>`,
       { kind: "h2", text: "HMR WebSocket" },
       {
         kind: "p",
-        text: "HMR runs over a same-origin WebSocket at `/_vesk/hmr` (upgrade requests are Origin-checked; foreign origins are destroyed). The last compile error is replayed to every newly connected client, and every broadcast message carries a `nonce` that gates client-side eval.",
+        text: "HMR runs over a same-origin WebSocket at `/_vesk/hmr`. Upgrades are Origin-checked — foreign origins are destroyed on arrival, so a rogue page can't subscribe to your edit stream. The last compile error is replayed to every newly connected client (a refresh otherwise blanks the error overlay), and every broadcast message carries a `nonce` that gates client-side eval, so a hijacked socket can't run arbitrary code in your pages.",
       },
       {
         kind: "table",
@@ -124,7 +193,7 @@ Scaffolding:  npx create-vesk@latest <project-name>`,
       { kind: "h2", text: "vesk build" },
       {
         kind: "p",
-        text: "`vesk build` emits a production build into `.vesk/`. It requires `app/` (exits with a clear error otherwise) and errors out with `process.exit(1)` on compiler failures. Route code splitting is on by default; `--skip-split` produces a monolithic `static/client.js`.",
+        text: "`vesk build` emits a production build into `.vesk/` — one SSR function per page, API routes, the tree-shaken client runtime, static assets, and a `config.json` manifest. It requires `app/` (exits with a clear error otherwise) and errors out with `process.exit(1)` on compiler failures. Route code splitting is on by default; `--skip-split` produces a monolithic `static/client.js`.",
       },
       {
         kind: "list",
@@ -153,6 +222,10 @@ Scaffolding:  npx create-vesk@latest <project-name>`,
       },
       { kind: "h2", text: "vesk start" },
       {
+        kind: "p",
+        text: "`vesk start` is the production serving command — it takes the `.vesk/` build and serves it with security headers, rate limiting, ISR, and the baked middleware and events. Because it fails closed on a broken config, a bad deploy never silently serves a lax server.",
+      },
+      {
         kind: "list",
         items: [
           "Serves the `.vesk/` build from `config.json`. Exit with status 1 when no build exists (\"Run \\\"vesk build\\\" first\"). NODE_ENV is set to `production` if unset.",
@@ -166,7 +239,7 @@ Scaffolding:  npx create-vesk@latest <project-name>`,
       { kind: "h2", text: "vesk typecheck" },
       {
         kind: "p",
-        text: "`vesk typecheck` runs tsc-in-.vsk over the project: strict mode is the default, `--no-strict` disables it. `.vsk` files are parsed, converted to TSX, and checked by the TypeScript compiler alongside `.ts`/`.tsx`/`.js` files under `app/`. Exits non-zero if any errors exist; warnings are printed but do not fail.",
+        text: "`.vsk` is a superset of TypeScript, so `vesk typecheck` runs the tsc-in-.vsk pipeline over the whole project: strict mode is the default, `--no-strict` disables it. `.vsk` files are parsed, converted to TSX, and checked by the TypeScript compiler alongside `.ts`/`.tsx`/`.js` files under `app/`. Exits non-zero if any errors exist; warnings are printed but do not fail.",
       },
       {
         kind: "list",
@@ -181,7 +254,7 @@ Scaffolding:  npx create-vesk@latest <project-name>`,
       { kind: "h2", text: "vesk seo" },
       {
         kind: "p",
-        text: "`vesk seo` audits the app by walking `page.vsk` plus a same-directory `layout.vsk` (layout + page source combined). It prints per-route results and a summary of the form `<pages> pages — <errors> errors, <warnings> warnings [PASS | PASS_WARN | FAIL]`. With `--strict`, any errors cause exit code 1.",
+        text: "`vesk seo` audits the app by walking `page.vsk` plus a same-directory `layout.vsk` (layout + page source combined). It prints per-route results and a summary of the form `<pages> pages — <errors> errors, <warnings> warnings [PASS | PASS_WARN | FAIL]`. With `--strict`, any errors cause exit code 1 — the flag to run in CI so a page that loses its `<h1>` stops the deploy.",
       },
       {
         kind: "table",
@@ -200,7 +273,7 @@ Scaffolding:  npx create-vesk@latest <project-name>`,
       { kind: "h2", text: "vesk init" },
       {
         kind: "p",
-        text: "`vesk init` creates `src/global.css` (the Tailwind entrypoint) when missing and prints `vesk init: created <path>`. It already exists → prints a skipping message and exits 0.",
+        text: "`vesk init` is the small bootstrap command: it creates `src/global.css` (the Tailwind entrypoint) when missing and prints `vesk init: created <path>`. If it already exists it prints a skipping message and exits 0 — safe to run on an existing project.",
       },
       {
         kind: "code",
