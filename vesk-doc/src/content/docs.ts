@@ -1779,6 +1779,49 @@ update([]);            // clear the list`,
     ],
   },
   {
+    slug: "ai-skills",
+    title: "AI Agent Skills",
+    description:
+      "Install the `vesk` and `react-to-vesk` skills into your AI coding tool so agents reference the current Vesk API, not training data.",
+    group: "Tooling",
+    blocks: [
+      {
+        kind: "p",
+        text: "An AI coding agent is only as good as the reference it carries. Vesk ships two Agent Skills that pin that reference to the source of truth: the `vesk` skill is the canonical .vsk/API manual agents load before writing Vesk code, and `react-to-vesk` is a step-by-step conversion recipe for migrating React, Next.js and TanStack apps. One installer drops both into every major AI tool's native skill-discovery location.",
+      },
+      {
+        kind: "code",
+        filename: "terminal",
+        code: `curl -fsSL https://raw.githubusercontent.com/emeraldlinks/veskTs/main/scripts/install-skills.sh | bash`,
+      },
+      { kind: "h2", text: "What you get" },
+      {
+        kind: "list",
+        items: [
+          "`vesk` — the authoritative Vesk reference: .vsk components, track() reactivity, statement/expression bodies, islands, routing, data fetching, forms and server actions, API routes, config, and CLI commands.",
+          "`react-to-vesk` — precise React/Next.js/TanStack → .vsk migration recipes (hooks, routers, Query/Redux, forms, SSR modes, API routes), validated with `vesk typecheck` and the hydration suite.",
+        ],
+      },
+      { kind: "h2", text: "Supported tools" },
+      {
+        kind: "list",
+        items: [
+          "opencode (`~/.config/opencode/skills`)",
+          "Claude Code (`~/.claude/skills`)",
+          "GitHub Copilot (`~/.copilot/skills`)",
+          "OpenAI Codex (`~/.codex/skills`)",
+          "Gemini CLI / Antigravity (`~/.gemini/antigravity/skills`)",
+          "Cursor and Windsurf (project-scoped `.cursor/skills`, `.windsurf/skills`)",
+        ],
+      },
+      {
+        kind: "note",
+        tone: "info",
+        text: "Piping to bash installs only into tools whose skill directory already exists (the ones that are actually installed). Pin explicitly with VESK_SKILL_PLATFORMS=opencode,cursor, provision everything with `bash -s -- --all`, and re-run to refresh — re-running rewrites to the current skill content.",
+      },
+    ],
+  },
+  {
     slug: "prettier",
     title: "Prettier Plugin",
     description:
@@ -1890,6 +1933,7 @@ const docSlugOrder = [
   "plugin-api",
   "lsp",
   "lsp-editors",
+  "ai-skills",
   "prettier",
 ];
 
