@@ -17,12 +17,12 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "Every native app is a stack of screens, and routing is the layer you can't fake with components — it decides which screen is up, what sits on the back stack, and where a deep link lands. Vesk Native uses file-based routing by default: the folder structure under `app/` maps directly to navigation destinations, the same convention the web framework uses. Manual routes in `veskconfig.ts` cover anything the filesystem can't express.",
+        text: "Vesk Native uses file-based routing by default — the folder structure under `app/` maps directly to navigation routes. Manual routes can be added in `veskconfig.ts` for cases that don't fit the filesystem.",
       },
       { kind: "h2", text: "File-based routing" },
       {
         kind: "p",
-        text: "Place `.vsk` files in `app/` to create routes. The convention is identical to the web framework — a blog post, a shop item, an about page all become one folder each, and their URLs fall out of the layout for free:",
+        text: "Place `.vsk` files in `app/` to create routes. The convention is identical to the web framework:",
       },
       {
         kind: "table",
@@ -41,7 +41,7 @@ export const pages: { slug: string; title: string; description: string; group: s
         items: [
           "`layout.vsk` is skipped as a route — it wraps child routes via `{props.children}`.",
           "`page.vsk` inside a folder maps to that folder's path.",
-          "`[paramName]` folders create dynamic route segments — the param is extracted from the route.",
+          "`[paramName]` folders create dynamic route segments — the param is extracted from the URL.",
           "Nested folders create nested paths: `app/blog/[slug]/page.vsk` → `/blog/:slug`.",
         ],
       },
@@ -70,7 +70,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Dynamic params" },
       {
         kind: "p",
-        text: "Use `[paramName]` in the folder name to create a dynamic segment — the classic read-one-of-many route: one folder per blog post or product, still written once. Access the param value with `useParams()` in the page script:",
+        text: "Use `[paramName]` in the folder name to create a dynamic segment. Access the param value with `useParams()` in the page script:",
       },
       {
         kind: "code",
@@ -93,7 +93,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Manual routes" },
       {
         kind: "p",
-        text: "For routes that don't fit the filesystem — a settings screen, a shared profile route, a deep-link target — add them to `veskconfig.ts` under `routes`, living next to the rest of your app config. Manual routes use `component` to reference a component name defined in a `.vsk` file:",
+        text: "For routes that don't fit the filesystem, add them to `veskconfig.ts` under `routes`. Manual routes use `component` to reference a component name defined in a `.vsk` file:",
       },
       {
         kind: "code",
@@ -166,7 +166,7 @@ export default defineConfig({
       { kind: "h2", text: "Programmatic navigation" },
       {
         kind: "p",
-        text: "Taps aren't always enough — after a form submits, on a timer, from a side effect you need to move the stack imperatively. That's what the global helpers and the router hook are for:",
+        text: "In page scripts, navigate imperatively with the global helpers or the router hook:",
       },
       {
         kind: "table",
@@ -203,12 +203,12 @@ export default defineConfig({
       { kind: "h2", text: "Back navigation behavior" },
       {
         kind: "p",
-        text: "The back button is a native responsibility, and how it behaves is app decision, not an OS accident. Configure it in `veskconfig.ts` under `back`:",
+        text: "The back behavior is configured in `veskconfig.ts` under `back`:",
       },
       {
         kind: "list",
         items: [
-          "`mode: 'stack'` — the framework owns a custom back stack with double-back-to-exit.",
+          "`mode: 'stack'` — custom stack-based navigation with double-back-to-exit.",
           "`mode: 'system'` — delegates to the OS back button (Android default).",
           "`doubleBackToExit: true` — tapping back twice within `exitDelayMs` exits the app.",
           "`exitRoutes` — routes where a double-back exits; interior routes always pop the stack first.",
@@ -218,7 +218,7 @@ export default defineConfig({
       { kind: "h2", text: "Scroll restoration" },
       {
         kind: "p",
-        text: "Long lists lose their place if the router does nothing when you navigate away. The router automatically saves and restores scroll position per route — each route's scroll state lives in the `NavController` and is restored when you navigate back:",
+        text: "The router automatically saves and restores scroll position per route. Each route's scroll state is stored in the `NavController` and restored when navigating back.",
       },
       {
         kind: "code",
@@ -235,7 +235,7 @@ export default defineConfig({
       { kind: "h2", text: "Generated Kotlin router" },
       {
         kind: "p",
-        text: "The build generates a `Router.kt` with a `NavController` class that holds the navigation state as Compose `mutableStateOf` properties. Route matching strips `?query` and `#fragment` segments, matches `{param}` segments, and returns `null` for unknown routes (renders nothing) — deep-link launches resolve against the same matcher.",
+        text: "The build generates a `Router.kt` with a `NavController` class that holds the navigation state as Compose `mutableStateOf` properties. Route matching strips `?query` and `#fragment` segments, matches `{param}` segments, and returns `null` for unknown routes (renders nothing).",
       },
       {
         kind: "note",

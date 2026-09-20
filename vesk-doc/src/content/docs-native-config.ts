@@ -17,7 +17,7 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "By the time you ship an Android app you're making a pile of decisions that have nothing to do with markup — the application id, the SDK levels, how back behaves, what a deep link opens, which key signs the release. Vesk Native funnels all of them into `veskconfig.ts`, loaded with `defineConfig` from `@vesk/native`. The CLI resolves `veskconfig.ts` first, falling back to a legacy `veskconfig.json`; settings deep-merge over the defaults, so most apps start from the scaffolded file and change a few fields.",
+        text: "Native apps configure everything in `veskconfig.ts` with `defineConfig` from `@vesk/native`. The CLI loads `veskconfig.ts` first, falling back to a legacy `veskconfig.json`. Settings deep-merge over defaults, so most apps start with the generated file and change a few fields.",
       },
       { kind: "h2", text: "Basic config" },
       {
@@ -82,7 +82,7 @@ export default defineConfig({
         kind: "list",
         items: [
           "`colors` — light theme palette; `darkColors` — dark palette.",
-          "`theme: 'system'` follows the device setting; `'light'`/`'dark'` force a mode — useful when you want one fixed look regardless of what the user's phone prefers.",
+          "`theme: 'system'` follows the device setting; `'light'`/`'dark'` force a mode.",
           "`typography.fontFamily` maps to the Compose font family; `fontSize` is the base sp size.",
         ],
       },
@@ -115,7 +115,7 @@ export default defineConfig({
         kind: "list",
         items: [
           "`mode: 'stack'` — the framework owns the back stack; `'system'` delegates to the OS.",
-          "`doubleBackToExit` with `exitDelayMs` — a fast double-back at an exit route quits the app instead of popping.",
+          "`doubleBackToExit` + `doubleBackToExit` delay — fast double-back at an exit route quits the app.",
           "`exitRoutes` are route patterns (`'/flight/{id}'`) where a double-back exits instead of popping.",
           "The stack bottom always exits, even when not listed — it's the deep-link escape hatch.",
         ],
@@ -156,7 +156,7 @@ export default defineConfig({
       },
       {
         kind: "p",
-        text: "`media.broadcast: true` exposes `<video>`/`<audio>` playback as an Android media session — lock screen, media buttons, and headset controls all Just Work because the system treats your player like a native one. Set `false` to opt out.",
+        text: "`media.broadcast: true` exposes `<video>`/`<audio>` playback as an Android media session — lock screen, media buttons, and headset controls. Set `false` to opt out.",
       },
       { kind: "h2", text: "Routes & screens" },
       {
@@ -227,7 +227,7 @@ export default defineConfig({
       {
         kind: "list",
         items: [
-          "An external URL `scheme://host/pathPrefix...` launches the app at the matching route — a confirmation email linking straight into the app, no clipboard involved.",
+          "An external URL `scheme://host/pathPrefix...` launches the app at the matching route.",
           "Scheme defaults to the appId-derived scheme (`com.vesk.demo3` → `vesk.demo3`).",
           "Omitted `host` = any host matches; omitted `pathPrefix` = every path under the scheme/host matches.",
           "When `deepLinks` is entirely omitted, no intent-filter is emitted — deep links are disabled.",

@@ -17,44 +17,24 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "One file at the project root is where the framework's assumptions live: where your routes directory is, how strict the default security posture should be, whether to pre-render, which plugins to run. When someone asks \"where do I tell Vesk about X?\", the answer is almost always `vesk.config.ts`. It is optional — Vesk ships sensible defaults — but it is the file you reach for on day two, when the demo app becomes a real app.",
+        text:
+          "Vesk projects are configured with `vesk.config.js` or `vesk.config.ts` in the project root. TypeScript configs are transpiled inline at startup — no separate build step needed.",
       },
       { kind: "h2", text: "Basic config" },
       {
-        kind: "p",
-        text: "A config is just an object returned from `import { defineConfig }` in `@vesk/compiler`. `defineConfig` returns the object after normalizing it — resolving the security preset, filling default security values, validating the pieces it can — so what you see in the file is the intent, and what runs is that intent plus a safety net. A realistic config touches most of the knobs at once:",
-      },
-      {
         kind: "code",
         filename: "vesk.config.ts",
-        code: `import { defineConfig } from '@vesk/compiler';
-import tailwindcss from '@vesk/plugin-tailwind';
+        code: `import { defineConfig } from '@vesk/compiler'
 
 export default defineConfig({
-  // Where routes live: page.vsk, layout.vsk, middleware.ts, app/api/**.
   appDir: './app',
   outDir: '.vesk',
   publicDir: './public',
-
-  // Plugins hook into the build/dev pipelines.
-  plugins: [tailwindcss({ entry: 'src/global.css', appDir: 'app' })],
-
-  // Pre-render every page that exports getStaticProps/getStaticPaths.
-  ssg: {},
-
-  // Security posture (see the presets table below).
   security: 'strict',
-
-  // Client-router route-data freshness TTL in ms (default 0 = always fresh).
-  routeDataCache: 60_000,
-
-  // Markdown policy for the <Md> component.
-  md: { html: 'escape' },
+  md: {
+    html: 'escape',
+  },
 })`,
-      },
-      {
-        kind: "p",
-        text: "Read the shape top to bottom: `appDir` points at the directory the file-system router scans (default `./app`), `outDir` and `publicDir` say where the build writes and where static assets live, `plugins` registers build/dev hooks, `ssg: {}` pre-renders every page that exports `getStaticProps`/`getStaticPaths`, `security` selects the baseline posture, `routeDataCache` trades route-data freshness for snappier SPA navigation, and `md` fixes the markdown policy for `<Md>`. Don't enable everything at once; add the knobs the feature you're building actually touches.",
       },
       { kind: "h2", text: "Loading" },
       {
@@ -74,18 +54,18 @@ export default defineConfig({
           ["appDir", "string", "Source directory holding routes and components. CLI default: `./app`."],
           ["outDir", "string", "Build output directory. Default: `resolve(appDir, '..', '.vesk')` — the `.vesk/` folder."],
           ["publicDir", "string", "Static-assets directory served as-is. CLI default: `./public`."],
-          ["ssg", "SSGConfig", "Static-site generation marker: `{ getStaticPaths?() }`. When present, every page whose `.vsk` source exports `getStaticProps` (dynamic pages exporting `getStaticPaths`) pre-renders into `.vesk/prerendered/` at build time."],
+          ["ssg", "SSGConfig", "Static-site generation marker: `{ getStaticPaths?() }`. Pages exporting `getStaticProps` (dynamic pages exporting `getStaticPaths`) pre-render into `.vesk/prerendered/`."],
           ["plugins", "VeskPlugin[]", "Plugin objects registered into the build/dev pipelines (see the Plugin API page)."],
           ["security", "SecurityConfig", "Preset name, object, `false`, or a function receiving `preset` — see Security below."],
           ["routeDataCache", "number", "Client-router route-data freshness TTL in ms. Default `0` = always fetch fresh server data on an SPA visit."],
           ["md", "MdConfig", "Global markdown options for `<Md>`: `html` (`'escape'` default | `'allow'` | `'allowlist'`) and `allowTags`. `'allowlist'` with no `allowTags` uses the built-in default tag list (a, abbr, b, br, code, em, i, kbd, mark, q, s, samp, small, span, strong, sub, sup, time, u, var, wbr, and more)."],
-          ["logs", "boolean | { log?, warn?, error?, info?, debug? }", "Which `console.*` output is streamed to the devtool log tab. `false` disables all, `true` streams every level (default in dev), or pass a per-type object to select levels."],
         ],
       },
       { kind: "h2", text: "defineConfig" },
       {
         kind: "p",
-        text: "`defineConfig(config)` returns the config after normalizing it. It resolves `security` (preset string to object, `'off'`/`false` to `{}`, function to its return value) and then fills in guard defaults that apply on top of any preset. The point is that a config with no `security` key at all is still a secure-by-default app — the preset system only loosens the named picks, it never removes the floor.",
+        text:
+          "`defineConfig(config)` returns the config after normalizing it. It resolves `security` (preset string to object, `'off'`/`false` to `{}`, function to its return value) and then fills in guard defaults that apply on top of any preset.",
       },
       {
         kind: "list",
@@ -100,7 +80,8 @@ export default defineConfig({
       { kind: "h2", text: "Security presets" },
       {
         kind: "p",
-        text: "The named presets are built in `@vesk/compiler/src/config.ts`. `'default'` is defined as a shallow copy of `'strict'`. Presets only set the fields shown; the rate-limit / CORS / trust-proxy knobs live on `VeskSecurity` but are not part of any preset — those are per-deployment decisions you make explicitly, not presets the framework guesses for you.",
+        text:
+          "The named presets are built in `@vesk/compiler/src/config.ts`. `'default'` is defined as a shallow copy of `'strict'`. Presets only set the fields shown; the rate-limit / CORS / trust-proxy knobs live on `VeskSecurity` but are not part of any preset.",
       },
       {
         kind: "table",
@@ -114,12 +95,14 @@ export default defineConfig({
       {
         kind: "note",
         tone: "info",
-        text: "`security: false` / `'off'` sets the security object to `{}`. `defineConfig` then still applies its guard defaults (auto-escape, same-origin CSRF, `X-Frame-Options: DENY`, the default CSP, log redaction). `securityHeaders` always emits `X-Content-Type-Options: nosniff` and `X-XSS-Protection: 0` as well.",
+        text:
+          "`security: false` / `'off'` sets the security object to `{}`. `defineConfig` then still applies its guard defaults (auto-escape, same-origin CSRF, `X-Frame-Options: DENY`, the default CSP, log redaction). `securityHeaders` always emits `X-Content-Type-Options: nosniff` and `X-XSS-Protection: 0` as well.",
       },
       { kind: "h2", text: "preset()" },
       {
         kind: "p",
-        text: "Presets get you a coherent baseline without memorizing every field. `preset(name, overrides?)` returns a security object for `'production'` (strict settings) or `'development'` (strict minus Content-Security-Policy, so HMR and dev tools aren't throttled by a lockdown CSP). Unknown names throw, and `overrides` are merged last — which is how you take a strong baseline and relax exactly one thing, like the CSP for an analytics script.",
+        text:
+          "`preset(name, overrides?)` returns a security object for `'production'` (strict settings) or `'development'` (strict minus Content-Security-Policy). Unknown names throw, and `overrides` are merged last. It is normally reached through the `security` function form:",
       },
       {
         kind: "code",
@@ -146,12 +129,14 @@ export default defineConfig({
       {
         kind: "note",
         tone: "warn",
-        text: "There is no built-in mechanism that copies environment variables into client code. Anything the client needs must be fetched or explicitly wired — do not rely on env vars leaking into the client bundle.",
+        text:
+          "There is no built-in mechanism that copies environment variables into client code. Anything the client needs must be fetched or explicitly wired — do not rely on env vars leaking into the client bundle.",
       },
       { kind: "h2", text: "Platforms" },
       {
         kind: "p",
-        text: "The same codebase deploys to different shapes — a long-lived Node server, a Vercel function, a Cloudflare worker. `vesk build --platform <name>` picks the deployment artifact. Without the flag, the adapter auto-detects the platform from well-known CI/build environment variables and otherwise defaults to a standard Node server, so a plain `vesk build` in your CI gives you whatever your provider's environment hints at.",
+        text:
+          "`vesk build --platform <name>` picks the deployment artifact. Without the flag, the adapter auto-detects the platform from well-known CI/build environment variables and otherwise defaults to a standard Node server.",
       },
       {
         kind: "table",
@@ -170,7 +155,8 @@ export default defineConfig({
       { kind: "h2", text: "App events and server context" },
       {
         kind: "p",
-        text: "Plugins aren't the only way to run code around the server's lifetime. App-level lifecycle events live in one convention file: `app/_events.ts` (or `app/_events.js`), which exports optional `onStart`, `onRequest` and `onStop` handlers. The `_` prefix marks the file private — it is never routed. The point of the file is a single, obvious place to open your database, count requests, and close the door on shutdown. Both the events file and plugin `onStart`/`onStop` hooks receive a `ServerEventContext`, so the same code shape works in both places.",
+        text:
+          "App-level lifecycle events live in one convention file: `app/_events.ts` (or `app/_events.js`), which exports optional `onStart`, `onRequest` and `onStop` handlers. The `_` prefix marks the file private — it is never routed. Both the events file and plugin `onStart`/`onStop` hooks receive a `ServerEventContext`.",
       },
       {
         kind: "code",
@@ -211,12 +197,14 @@ export async function onRequest(ctx: ServerEventContext) {
       {
         kind: "note",
         tone: "info",
-        text: "The plugin `onStart` and `onStop` hooks receive the same `ServerEventContext` — see the Plugin API page. Plugin objects only exist in dev/build processes; the production process runs the baked `app/_events.ts` handlers instead.",
+        text:
+          "The plugin `onStart` and `onStop` hooks receive the same `ServerEventContext` — see the Plugin API page. Plugin objects only exist in dev/build processes; the production process runs the baked `app/_events.ts` handlers instead.",
       },
       { kind: "h2", text: "Component context (createContext)" },
       {
         kind: "p",
-        text: "One config-adjacent piece is easy to confuse with `serverLocals`, and it is the opposite scale. `createContext` is a component-scoped runtime API (from `@vesk/runtime/src/context.ts`), not a config or plugin feature. It is auto-imported from `@vesk/runtime` whenever a `.vsk` component uses it. `createContext(defaultValue)` returns a `Context<T>`: `get()` walks up the active-component chain returning the nearest value set by an ancestor (falling back to the default), and `set(value)` stores a value for the currently rendering component (it throws `No active component found, cannot set context` outside a render). `getActiveComponent()` / `setActiveComponent()` are the runtime's lower-level hooks for tracking the active component and are used by renderer internals.",
+        text:
+          "`createContext` is a component-scoped runtime API (from `@vesk/runtime/src/context.ts`), not a config or plugin feature. It is auto-imported from `@vesk/runtime` whenever a `.vsk` component uses it. `createContext(defaultValue)` returns a `Context<T>`: `get()` walks up the active-component chain returning the nearest value set by an ancestor (falling back to the default), and `set(value)` stores a value for the currently rendering component (it throws `No active component found, cannot set context` outside a render). `getActiveComponent()` / `setActiveComponent()` are the runtime's lower-level hooks for tracking the active component and are used by renderer internals.",
       },
       {
         kind: "tabs",
@@ -244,7 +232,8 @@ export async function onRequest(ctx: ServerEventContext) {
       {
         kind: "note",
         tone: "info",
-        text: "Component context (`createContext` / `Context`) is per-component-tree state and is unrelated to the server-wide `serverLocals` store above, and to the plugin `provides` injection mechanism.",
+        text:
+          "Component context (`createContext` / `Context`) is per-component-tree state and is unrelated to the server-wide `serverLocals` store above, and to the plugin `provides` injection mechanism.",
       },
     ],
   },
@@ -257,7 +246,8 @@ export async function onRequest(ctx: ServerEventContext) {
     blocks: [
       {
         kind: "p",
-        text: "Sooner or later every framework meets a project that wants something the core doesn't ship — a Tailwind compile step, an injected manifest, a global CSP tweak, a custom transform over emitted files. Vesk plugins exist for exactly that, without forking the compiler. There is no Vite adapter: `vesk dev` / `vesk build` are the entry points, and plugins are plain objects registered in `vesk.config.ts`. The hook contract is defined by `VeskPlugin` in `@vesk/types`, so the type checker is the documentation.",
+        text:
+          "Vesk plugins extend the build pipeline and dev server. There is no Vite adapter — `vesk dev` / `vesk build` are the entry points, and plugins are plain objects registered in `vesk.config.ts`. The hook contract is defined by `VeskPlugin` in `@vesk/types`.",
       },
       { kind: "h2", text: "Plugin shape" },
       {
@@ -269,10 +259,6 @@ export async function onRequest(ctx: ServerEventContext) {
         ],
       },
       { kind: "h2", text: "Registering plugins" },
-      {
-        kind: "p",
-        text: "Plugins are declared where all other project policy lives — `vesk.config.ts`. The `plugins` array is passed through `definePlugin` if you hand it a plain object (it enforces a non-empty `name`), then validated by `validateConfig` before any command runs. Package plugins like Tailwind are called as factories so they can take per-project options; your own plugins are usually bare objects.",
-      },
       {
         kind: "code",
         filename: "vesk.config.ts",
@@ -292,10 +278,6 @@ export default defineConfig({
 })`,
       },
       { kind: "h2", text: "Hooks" },
-      {
-        kind: "p",
-        text: "Hooks are where a plugin actually does something. The build hooks bracket compiles, the transform hooks rewrite emitted files, the render hooks reshape the HTML your users see, and the request hooks sit in the middleware chain. Pick the narrowest one that does the job — a plugin that only rewrites the `<head>` starts and stops at `onHead`.",
-      },
       {
         kind: "table",
         head: ["Hook", "Signature", "When it runs"],
@@ -326,22 +308,18 @@ export default defineConfig({
       },
       { kind: "h2", text: "Registration and validation" },
       {
-        kind: "p",
-        text: "Plugins form a small registry: `defineConfig({ plugins })` registers each object, `validateConfig` checks the contract, and `.vesk/plugins.json` records activation state that the dev panel reads so you can inspect and toggle what's actually wired into this build. `vesk plugin add` is the convenience path for pulling a package plugin into that registry.",
-      },
-      {
         kind: "list",
         items: [
           "`definePlugin(plugin)` requires an object with a non-empty `name` string and throws otherwise.",
           "After config load the CLI runs `validateConfig`, which rejects a plugin with no `name` and any plugin whose only surface is unrecognized — it must implement at least one of `onCSS`, `onFileWatch`, `onTransformJS`, `onBuildStart`, `onBuildEnd`, `onRequest`, `onStart`, `onStop`, `onHead`, `onHtml`, or provide a non-empty `provides`.",
           "Config-declared plugins default to active. Activation can be overridden through the dev panel / `.vesk/plugins.json` state file; an inactive plugin is dropped from every build and dev pipeline, and an uninstalled plugin can never be active.",
-          "Searching the registry is the fail-fast way to find out why a hook didn't run: if the plugin isn't registered, isn't active, or failed validation, it never reaches the pipeline at all.",
         ],
       },
       { kind: "h2", text: "provides" },
       {
         kind: "p",
-        text: "`provides` is how a plugin hands values to the rest of the app without a shared global. It is a `Record<string, value-or-factory>`. When a request enters the middleware chain, each entry is resolved — a function is invoked (and awaited when async), any other value is used as-is — and written into the per-request context with `ctx.set(key, …)` before `onRequest` runs. The plugin below injects a greeting and then proves it arrived by measuring it from its own `onRequest`.",
+        text:
+          "`provides` is a `Record<string, value-or-factory>`. When a request enters the middleware chain, each entry is resolved — a function is invoked (and awaited when async), any other value is used as-is — and written into the per-request context with `ctx.set(key, …)` before `onRequest` runs.",
       },
       {
         kind: "code",
@@ -362,7 +340,8 @@ export default definePlugin({
       { kind: "h2", text: "@vesk/plugin-tailwind" },
       {
         kind: "p",
-        text: "The Tailwind integration ships as a plugin factory imported by default export. `tailwindcss(options?)` accepts `{ entry?, appDir? }` with defaults `entry: 'src/global.css'` and `appDir: 'app'`, and returns a plugin named `@vesk/plugin-tailwind`. It does exactly one job — decide whether your CSS entry is Tailwind-compiled or copied through untouched — and fits the build pipeline so the stylesheet is always at the same served path, dev and prod alike.",
+        text:
+          "The Tailwind integration ships as a plugin factory imported by default export. `tailwindcss(options?)` accepts `{ entry?, appDir? }` with defaults `entry: 'src/global.css'` and `appDir: 'app'`, and returns a plugin named `@vesk/plugin-tailwind`.",
       },
       {
         kind: "list",
@@ -370,7 +349,7 @@ export default definePlugin({
           "`onCSS` fires only for the configured entry file — every other `filePath` passes through untouched.",
           "It extracts Tailwind v4 directives (`@import tailwindcss`, `@source`, `@theme`, `@layer base|components|utilities`, `@utility`) from the entry, compiles the remaining user CSS with Tailwind, and returns the compiled stylesheet.",
           "Class purging: it scans `.vsk`, `.js`, `.ts`, `.jsx`, `.tsx` files for `class=\"…\"` / `classname=\"…\"` attributes and feeds those class strings (length > 1, not `{…}` expressions) into the Tailwind candidate list.",
-          "On a compile error it logs the failure and falls back to the non-directive user CSS.",
+          "On a compile error it logs the failure and falls back to the non-directive user CSS.", 
           "Dev: the compiled CSS is rebuilt live and served at `/_vesk/static/global.css`; editing a `.vsk` or the entry CSS re-runs `onCSS` and hot-swaps the stylesheet.",
           "Build: the output is written to `.vesk/static/global.css`, which the rendered HTML links as `/_vesk/static/global.css`.",
           "`onBuildStart` resets its dependency set, and `onFileWatch` reports the dependency files it tracks — the plugin keeps a `dependencies` set fed by Tailwind's `onDependency` callbacks.",
@@ -379,12 +358,14 @@ export default definePlugin({
       {
         kind: "note",
         tone: "info",
-        text: "Because the export is the default, configure it with `import tailwindcss from '@vesk/plugin-tailwind'`. A bare CSS pipeline (no plugin) still copies `src/global.css` to `.vesk/static/global.css` — the plugin only decides whether that copy is Tailwind-compiled.",
+        text:
+          "Because the export is the default, configure it with `import tailwindcss from '@vesk/plugin-tailwind'`. A bare CSS pipeline (no plugin) still copies `src/global.css` to `.vesk/static/global.css` — the plugin only decides whether that copy is Tailwind-compiled.",
       },
       {
         kind: "note",
         tone: "info",
-        text: "For app-level lifecycle events (`app/_events.ts`, `ServerEventContext`, `serverLocals`) see the Configuration page's App events section — plugin `onStart`/`onStop` share that same context type.",
+        text:
+          "For app-level lifecycle events (`app/_events.ts`, `ServerEventContext`, `serverLocals`) see the Configuration page's App events section — plugin `onStart`/`onStop` share that same context type.",
       },
     ],
   },

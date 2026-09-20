@@ -17,7 +17,7 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "A web app lives inside a browser tab; the moment yours needs a photo, a notification, a GPS fix, or a read of the battery, it has to reach the platform underneath. Vesk Native exposes Android device capabilities three ways, and you pick whichever fits the shape of your code: state bindings recompose automatically, callbacks hand one-shot results to a vesk cell, and markup elements compile straight to native composables.",
+        text: "The native framework exposes Android device capabilities three ways — the page picks whichever fits the shape of its code: state bindings recompose automatically, callbacks hand results to vesk cells, and markup elements compile directly to native composables.",
       },
       { kind: "h2", text: "Access patterns" },
       {
@@ -31,7 +31,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Script API reference" },
       {
         kind: "p",
-        text: "All device APIs are available on the `device` object in `.vsk` scripts. This is the full surface, grouped by what each call actually touches — imaging, the recorder, notifications, power, sensors, telephony, even the SIM card. Reach for the script form when the call is logic in your component; the element tags below cover the cases where you'd rather declare it in markup. The full method surface:",
+        text: "All device APIs are available on the `device` object in `.vsk` scripts. The full method surface:",
       },
       {
         kind: "table",
@@ -66,7 +66,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Permissions" },
       {
         kind: "p",
-        text: "The build scans the `.vsk` pages (AST walks — no regex) and declares in the Android manifest only the permissions the used device APIs need. `device.*` calls and their element-tag counterparts map through the same `API_PERMISSIONS` table, so a camera page and a `<camera />` page cost the user the same prompt:",
+        text: "The build scans the `.vsk` pages (AST walks — no regex) and declares in the Android manifest only the permissions the used device APIs need. `device.*` calls and their element-tag counterparts map through the same `API_PERMISSIONS` table:",
       },
       {
         kind: "table",
@@ -94,7 +94,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       {
         kind: "note",
         tone: "info",
-        text: "Legacy permissions that only exist for a bounded SDK range are maxSdkVersion-scoped: READ_EXTERNAL_STORAGE to SDK 32 and the Bluetooth pair (BLUETOOTH/BLUETOOTH_ADMIN) to SDK 30 — the manifest stays honest on modern devices. FileProvider / queries / service declarations and bundled assets are added only when a page actually needs them.",
+        text: "Legacy permissions that only exist for a bounded SDK range are maxSdkVersion-scoped: READ_EXTERNAL_STORAGE to SDK 32 and the Bluetooth pair (BLUETOOTH/BLUETOOTH_ADMIN) to SDK 30. FileProvider / queries / service declarations and bundled assets are added only when a page actually needs them.",
       },
       {
         kind: "note",
@@ -104,7 +104,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Tangible elements" },
       {
         kind: "p",
-        text: "The declarative device elements compile to the same runtime surface as the script `device.*` API. Declare them where the camera, the battery, or the scanner belongs in your layout, and get the state binding or `onresult` callback for free. Each tag maps to a composable and feeds the manifest scan:",
+        text: "The declarative device elements compile to the same runtime surface as the script `device.*` API. Each tag maps to a composable and feeds the manifest scan:",
       },
       {
         kind: "code",
@@ -132,7 +132,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Media element tiers" },
       {
         kind: "p",
-        text: "Media and device elements split into three tiers by permission requirements — so a photo picker stays frictionless while recording your voice needs an explicit prompt. Know which tier your feature sits in before you build it:",
+        text: "Media and device elements split into three tiers by permission requirements:",
       },
       {
         kind: "table",
@@ -146,7 +146,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Drag & drop" },
       {
         kind: "p",
-        text: "Markup-level native drag & drop: a `draggable` element becomes a drag source (payload from its `dragdata` attribute or text content); an `ondrop={(text) => { ... }}` element is a drop target. Payloads also land in other apps (`DRAG_FLAG_GLOBAL`) — drag a photo out of your app and into Photos, the OS handles the transfer:",
+        text: "Markup-level native drag & drop: a `draggable` element becomes a drag source (payload from its `dragdata` attribute or text content); an `ondrop={(text) => { ... }}` element is a drop target. Payloads also land in other apps (`DRAG_FLAG_GLOBAL`).",
       },
       {
         kind: "code",
@@ -168,20 +168,20 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Usage analysis" },
       {
         kind: "p",
-        text: "Nothing ships 'just in case'. The CLI's `usage.ts` scans the compiled project and the `.vsk` sources to derive exactly what ends up in the app — which manifest permissions, which runtime helpers, which browser-API shims:",
+        text: "The CLI's `usage.ts` scans the compiled project and the `.vsk` sources to derive exactly what ships in the app:",
       },
       {
         kind: "list",
         items: [
           "`collectDeviceApiUsage(appDir)` — AST+IR walk over .vsk scripts for `device.<api>()` calls and device element tags; drives manifest permissions and runtime grants.",
-          "`collectBrowserApiUsage(appDir)` — finds `fetch`, `localStorage`/`sessionStorage`, `openSqlite`, auth (`signUp`/`signIn`/`signOut`/`currentUser`/`isSignedIn`), `WebSocket`, `EventSource` to decide their manifest needs — `fetch`, `WebSocket`, and `EventSource` pull in INTERNET; storage and sqlite need no permission at all.",
+          "`collectBrowserApiUsage(appDir)` — finds `fetch`, `localStorage`/`sessionStorage`, `openSqlite`, auth (`signUp`/`signIn`/`signOut`/`currentUser`/`isSignedIn`), `WebSocket`, `EventSource` to decide their manifest needs.",
           "`collectRuntimeUsage(appDir)` — scans generated Kotlin to pick exactly the runtime helpers actually called (video/audio helpers only when a page uses `<video>`/`<audio>`, the device runtime only when a device API or element appears).",
         ],
       },
       { kind: "h2", text: "Runtime permission prompts" },
       {
         kind: "p",
-        text: "Dangerous permissions are requested at the point of use through the Compose runtime. When a page triggers a device API that needs runtime consent (camera, microphone, location, contacts), the framework shows the Android system prompt and resumes the callback with the grant result — so the flow is write a handler, call the API, get the result, never manage the prompt yourself:",
+        text: "Dangerous permissions are requested at the point of use through the Compose runtime. When a page triggers a device API that needs runtime consent (camera, microphone, location, contacts), the framework shows the Android system prompt and resumes the callback with the grant result.",
       },
       {
         kind: "code",
@@ -205,7 +205,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       {
         kind: "note",
         tone: "warn",
-        text: "`{#head}` blocks are not supported in native, and `{#server}` blocks raise the compiler's TODO() hard build error for untranslatable constructs — never a silent drop or JS runtime fallback. Web-only `on*` attributes that no native runtime surface backs are rejected at compile time.",
+        text: "`{#head}` blocks are not supported in native, and `{#server}` blocks compile to an explicit `error(...)` so nothing silently miscompiles. Web-only `on*` attributes not backed by a native runtime surface are rejected at compile time.",
       },
     ],
   },

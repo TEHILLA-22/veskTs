@@ -17,7 +17,7 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "When you write `fetch` or `localStorage` in a `.vsk` component, you're writing against the browser's platform — and on native those calls have to land somewhere real. They land on Android infrastructure: `fetch` becomes OkHttp or HttpURLConnection, `localStorage` becomes SharedPreferences or DataStore, timers become coroutines. The mapping happens at compile time and produces real Kotlin, so a built app contains no JavaScript shim and no hidden webview.",
+        text: "Vesk Native maps the browser/web-platform APIs you write in `.vsk` onto real Android/Kotlin equivalents — never a JS shim in a built app. `fetch` → OkHttp/HttpURLConnection, `localStorage` → SharedPreferences/DataStore, timers → coroutines, and so on.",
       },
       { kind: "h2", text: "Network" },
       {
@@ -28,10 +28,6 @@ export const pages: { slug: string; title: string; description: string; group: s
           ["new WebSocket(url)", "OkHttp WebSocket client", "INTERNET (when used)"],
           ["new EventSource(url)", "OkHttp SSE streaming client", "INTERNET (when used)"],
         ],
-      },
-      {
-        kind: "p",
-        text: "A `fetch` inside an `onClick` is just a `fetch` — the same promise semantics, with the transport swapped underneath. The manifest `INTERNET` permission is added automatically when the compiler sees the API used:",
       },
       {
         kind: "code",
@@ -64,10 +60,6 @@ export const pages: { slug: string; title: string; description: string; group: s
         ],
       },
       {
-        kind: "p",
-        text: "`localStorage` keeps working as the same `getItem`/`setItem` pairs, but the backing store is real Android persistent storage — initialize a tracked cell from `getItem` and the value is there again next launch:",
-      },
-      {
         kind: "code",
         filename: "app/labs/storage/page.vsk",
         language: "tsx",
@@ -88,7 +80,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "SQLite" },
       {
         kind: "p",
-        text: "`openDatabase(name)` — the web-style SQLite API — maps to the Android SQLite engine. `bindArgs` and row access run through the JS-semantics runtime so the exact coercion behavior matches the browser, even though the engine under the hood is SQLite:",
+        text: "`openDatabase(name)` — the web-style SQLite API — maps to the Android SQLite engine. `bindArgs`/row access goes through the JS-semantics runtime so the exact coercion behavior matches the browser:",
       },
       {
         kind: "code",
@@ -111,18 +103,14 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Auth" },
       {
         kind: "p",
-        text: "The `@vesk/browser` auth surface (`signUp`, `signIn`, `signOut`, `currentUser`, `isSignedIn`) maps to the `VeskAuth` runtime helper — an interface you wire to your identity provider. Using it pulls the auth helper into the app's runtime; the provider itself is yours to implement, so nothing about your auth vendor leaks into the framework.",
+        text: "The `@vesk/browser` auth surface (`signUp`, `signIn`, `signOut`, `currentUser`, `isSignedIn`) maps to the `VeskAuth` runtime helper — an interface you wire to your identity provider. Using it pulls the auth helper into the app's runtime; the exact provider is yours to implement.",
       },
       { kind: "h2", text: "JS semantics runtime" },
       {
         kind: "p",
-        text: "Where native Kotlin types can't express JavaScript behavior exactly, the compiler emits the JS-semantics helpers — `jsString`, `jsSafe`, `jsTypeof`, `jsGlobalIsNaN`, `jsParseInt`, `jsRegexExec`, `jsStringify`, `jsParseJson`, `jsMapOf`, `jsIndex`, `jsLength`, `jsForEach` — so coercion, truthiness, equality, and property lookup behave exactly like the browser engine. The emitted set is pruned to what the app actually uses: a codebase that never touches regex ships no `jsRegexExec`.",
+        text: "Where native Kotlin types can't express JavaScript behavior exactly, the compiler emits the JS-semantics helpers — `jsString`, `jsSafe`, `jsTypeof`, `jsGlobalIsNaN`, `jsParseInt`, `jsRegexExec`, `jsStringify`, `jsParseJson`, `jsMapOf`, `jsIndex`, `jsLength`, `jsForEach` — so coercion, truthiness, equality, and property lookup behave exactly like the browser engine. These are pruned to the ones the app actually uses.",
       },
       { kind: "h2", text: "Timers & console" },
-      {
-        kind: "p",
-        text: "Timers, structured logging, and the occasional blocking dialog round out the everyday surface:",
-      },
       {
         kind: "table",
         head: ["API", "Kotlin mapping", "Notes"],
@@ -135,7 +123,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Platform seam" },
       {
         kind: "p",
-        text: "`veskPlatformSeams` is the runtime's platform boundary — where web-API calls route to Android services (activity, compose view tree, system services, shared preferences, OkHttp, coroutines) versus JVM/desktop equivalents. The platform `expect`/`actual` pairs live in the shared KMP module, and the web preview uses `web-preview-shim.ts` only in dev — never in a built app.",
+        text: "`veskPlatformSeams` is the runtime's platform boundary — where web-API calls route to Android services (activity, compose view tree, system services, shared preferences, OkHttp, coroutines) versus JVM/desktop equivalents. Platform `expect`/`actual` pairs live in the shared KMP module; the web preview uses `web-preview-shim.ts` only in dev, never in a built app.",
       },
       {
         kind: "note",
@@ -143,10 +131,6 @@ export const pages: { slug: string; title: string; description: string; group: s
         text: "Every accepted construct must produce the exact result the browser engine would. Constructs the compiler cannot translate yet are hard build errors (`TODO(...)` fails the build) — never a silent miscompile or a runtime JS fallback.",
       },
       { kind: "h2", text: "Usage-driven shipping" },
-      {
-        kind: "p",
-        text: "The mapping is never all-or-nothing. The build inspects the project, then wires in exactly the runtime helpers and permissions your actual code touches:",
-      },
       {
         kind: "list",
         items: [

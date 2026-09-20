@@ -17,7 +17,7 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "The fastest way to see native Vesk is to scaffold a project and look at what appears. `create-vesk-native` produces a complete, runnable native app — gradle build files, a sample `.vsk` page tree, `veskconfig.ts`, and `package.json` scripts — so your first build is an APK you can install, not a blank template you have to wire up. No Android Studio project setup is involved: the CLI generates every file and owns it.",
+        text: "`create-vesk-native` scaffolds a complete native project: gradle build files, a sample `.vsk` page tree, `veskconfig.ts`, and `package.json` scripts. No Android Studio project setup — the CLI owns every generated file.",
       },
       { kind: "h2", text: "Scaffold a project" },
       {
@@ -49,7 +49,7 @@ npm run dev`,
       { kind: "h2", text: "Toolchain setup" },
       {
         kind: "p",
-        text: "If the machine can't build Android yet, the CLI finds that out during the first command and offers to fix it. It detects your OS, your architecture, and whether you are on Termux, then resolves the Android SDK automatically. When the toolchain is missing it offers to install it:",
+        text: "The CLI detects your OS, architecture, and whether you are on Termux, then resolves the Android SDK automatically. When the toolchain is missing it offers to install it:",
       },
       {
         kind: "list",
@@ -57,7 +57,7 @@ npm run dev`,
           "JDK 17+ — detected via `JAVA_HOME` or `which java`.",
           "Android SDK — detected via `ANDROID_HOME`, `ANDROID_SDK_ROOT`, the toolchain root, or Termux `$PREFIX`.",
           "Gradle 9.7.0 — managed at the toolchain root; PATH gradle is used only if it is a supported version.",
-          "Install commands: `vesk-native setup` provisions everything under the toolchain root; `vesk-native update-tools` refreshes SDK packages and Gradle.",
+          "Install commands: `vesk setup` provisions everything under the toolchain root; `vesk update-tools` refreshes SDK packages and Gradle.",
         ],
       },
       {
@@ -107,9 +107,9 @@ shared/
       {
         kind: "list",
         items: [
-          "`build` regenerates all Kotlin sources from `.vsk` files, then runs `gradle assembleDebug` — regenerate first, compile second, so a stale Kotlin tree can't leak into the APK.",
+          "`build` regenerates all Kotlin sources from `.vsk` files, then runs `gradle assembleDebug`.",
           "Every generated file is owned by vesk-native and regenerated on every build — never hand-edit generated files.",
-          "The debug APK is signed with the debug keystore automatically, so your very first build is installable on a device or emulator.",
+          "The debug APK is signed with the debug keystore automatically.",
         ],
       },
       { kind: "h2", text: "Scripts" },
@@ -130,14 +130,14 @@ shared/
           "All configuration lives in `veskconfig.ts` — no XML, no Kotlin, no gradle edits.",
           "All app code lives in `.vsk` component files — Tailwind classes become Compose Modifier chains.",
           "Permissions, gradle deps, and runtime helpers are derived from what the app actually uses — never added 'just in case'.",
-          "Tracked state uses `track()` and `&[]` sugar — same as web: `const &[count] = track(0)`. Reads auto-subscribe, writes schedule updates.",
+          "Tracked state uses `track()` and `&[]` sugar — same as web. Reads auto-subscribe, writes schedule updates.",
           "The `component` keyword, statement mode, and expression mode all work exactly as they do on the web.",
         ],
       },
       {
         kind: "note",
         tone: "warn",
-        text: "CSS animation classes are unsupported in native — use `motion.animate()` instead. The compiler warns on unsupported web constructs and raises a hard build error (TODO()) on untranslatable ones — never a silent miscompile or JS runtime fallback.",
+        text: "CSS animation classes are unsupported in native — use motion.animate() instead. The compiler warns on unsupported web constructs and hard-errors on untranslatable constructs.",
       },
     ],
   },

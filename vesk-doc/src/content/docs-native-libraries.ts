@@ -17,14 +17,14 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "Your `.vsk` app will eventually need something the framework doesn't ship — Lottie animations, a charts library, Retrofit for a REST API. Vesk Native lets you install real Kotlin/Android libraries and call them straight from `.vsk` files. Installed libraries are tracked in a committed `libraries.json` manifest, resolved against a curated `.vsklib` registry (Coil, Retrofit, Room, and friends), with auto-generated typed bindings for anything the registry doesn't cover.",
+        text: "Native apps can install real Kotlin/Android libraries and use them from `.vsk` files. Installed libraries are tracked in a committed `libraries.json` manifest, resolved against a curated `.vsklib` registry (for common libraries like Coil, Retrofit, and Room), with auto-generated typed bindings for anything else.",
       },
       { kind: "h2", text: "The two file surfaces" },
       {
         kind: "table",
         head: ["File", "Role"],
         rows: [
-          ["libraries.json", "Committed manifest of installed libraries — like package.json. Written only by `vesk-native add/remove/update/install`."],
+          ["libraries.json", "Committed manifest of installed libraries — like package.json. Written only by `vesk add/remove/update/install`."],
           [".vsklib/", "Gitignored, disposable per-library record cache (AAR metadata, signatures, generated .d.ts declarations)."],
         ],
       },
@@ -87,13 +87,13 @@ vesk-native add com.google.code.gson:gson@2.11.0`,
           "`permissions` — manifest permissions the library needs, merged with the usage scan.",
           "`exports` — composable tags / JS exports the library makes available to `.vsk`.",
           "`minSdk` — raised across installed libraries.",
-          "`essential` / `curated` — registry-authoring flags.",
+          "`esssential` / `curated` — registry-authoring flags.",
         ],
       },
       { kind: "h2", text: "Using a library from .vsk" },
       {
         kind: "p",
-        text: "A library is only in scope in a file that explicitly imports it — installing a library never dumps its tags into every page, which keeps the compiler fast and the bundle honest. Import it like any JS dependency, then use the exported tag:",
+        text: "A library is only in scope in a file that explicitly imports it — installing a library never puts its tags in every page:",
       },
       {
         kind: "code",
@@ -116,7 +116,7 @@ export component LibExample() {
       { kind: "h2", text: "Curated registry" },
       {
         kind: "p",
-        text: "The registry ships committed `.vsklib` records in categories, authored from real library metadata — never invented. If your library is in here, `add` is one word and the record is trusted as written:",
+        text: "The registry ships committed `.vsklib` records in categories, authored from real library metadata — never invented:",
       },
       {
         kind: "table",
@@ -137,7 +137,7 @@ export component LibExample() {
       { kind: "h2", text: "Permission derivation" },
       {
         kind: "p",
-        text: "Library permissions come from two sources, merged by `deriveLibraryPermissions` — the artifact's own manifest first, then a group-based fallback for well-known networking libs, so the exact permissions you declare match what the library actually needs:",
+        text: "Library permissions come from two sources, merged by `deriveLibraryPermissions`:",
       },
       {
         kind: "list",
@@ -150,9 +150,9 @@ export component LibExample() {
       {
         kind: "list",
         items: [
-          "`vesk-native install` is fully offline — libraries.json is trusted as authored; it's exactly what the build compiles against. Run it once after scaffolding to materialize everything pinned.",
-          "`vesk-native add` falls back to the pinned registry record when Maven is unreachable (with a warning), so a flaky network doesn't hold up development.",
-          "`vesk-native verify` reports unreachable registries as skip/warn, but hard-fails on `not-found` and `version-missing` (CI-safe) — a missing coordinate is a build error, not a shrug.",
+          "`vesk-native install` is fully offline — libraries.json is trusted as authored; it's exactly what the build compiles against.",
+          "`vesk-native add` falls back to the pinned registry record when Maven is unreachable (with a warning).",
+          "`vesk-native verify` reports unreachable registries as skip/warn, but hard-fails on `not-found` and `version-missing` (CI-safe).",
         ],
       },
       { kind: "h2", text: "Workflows" },

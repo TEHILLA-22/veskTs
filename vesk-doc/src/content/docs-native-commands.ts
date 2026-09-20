@@ -17,7 +17,7 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "Once the app is scaffolded, the day-to-day is a small set of commands worth keeping in your head — build, dev, and the library verbs carry almost all of it. The `vesk-native` binary (package `@vesk/native-cli`) runs from inside your project directory: there is no project-name positional, every command operates on the current working directory.",
+        text: "The `vesk-native` binary (package `@vesk/native-cli`) runs from inside your project directory — commands operate on the current working directory. There is no project-name positional.",
       },
       {
         kind: "code",
@@ -59,7 +59,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       {
         kind: "list",
         items: [
-          "Toolchain root precedence: `VESK_HOME` → `/opt/vesk-native-toolchain` → `~/.vesk-native` — set `VESK_HOME` when you want the toolchain somewhere specific or per-CI.",
+          "Toolchain root precedence: `VESK_HOME` → `/opt/vesk-native-toolchain` → `~/.vesk-native`.",
           "Termux is detected via `$TERMUX_VERSION`/`$PREFIX`; the SDK resolves to `$PREFIX/sdk`.",
           "Gradle: the managed `gradle-9.7.0` wins; PATH/GRADLE_HOME gradle is used only if `isSupportedGradle`. Otherwise the CLI exits pointing at `update-tools`.",
           "JDK: `JAVA_HOME` → `java` on PATH → error; keytool resolution mirrors this.",
@@ -78,7 +78,7 @@ export const pages: { slug: string; title: string; description: string; group: s
       { kind: "h2", text: "Programmatic surface" },
       {
         kind: "p",
-        text: "`@vesk/native-cli` also exports the machinery behind the commands for tooling and CI — so a CI job can call `verifyApp` exactly the way the CLI does, without shelling out:",
+        text: "`@vesk/native-cli` also exports the machinery behind the commands for tooling and CI:",
       },
       {
         kind: "list",

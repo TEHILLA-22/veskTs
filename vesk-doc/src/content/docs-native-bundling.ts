@@ -17,13 +17,9 @@ export const pages: { slug: string; title: string; description: string; group: s
     blocks: [
       {
         kind: "p",
-        text: "Shipping a mobile app is where the checklist lives: a keystore whose passwords must never leak, a certificate that won't expire for another decade, a provisioning profile from the right team, the correct export method for wherever you're submitting. `vesk-native bundle` runs that checklist for you. It produces the release artifacts for both platforms — Android AAB plus release APK, iOS Xcode project regeneration, archive, and exported `.ipa` — and it pre-flights the signing config first, so a wrong keystore password costs you a moment, not a full build and a store rejection.",
+        text: "`vesk-native bundle` produces the release artifacts for both platforms. Android builds AAB + release APK; iOS regenerates the Xcode project, archives, and exports an .ipa. Signing is configured in `veskconfig.ts` and pre-flighted before anything is built.",
       },
       { kind: "h2", text: "Requirement summaries" },
-      {
-        kind: "p",
-        text: "Both stores enforce requirements that drift over time; these are the ones the CLI cheats against up front:",
-      },
       {
         kind: "table",
         head: ["Platform", "Requirements"],
@@ -54,25 +50,25 @@ export const pages: { slug: string; title: string; description: string; group: s
       {
         kind: "list",
         items: [
-          "`storeFile` — absolute or app-relative path to the upload-key keystore. This is the key Play trusts; choose its location the way you'd choose where to keep a physical safe key.",
-          "Passwords reference environment variables as `env:NAME` strings — never plain values — so secrets never land in generated build files or a repo.",
-          "No signing config → release artifacts are signed with the debug keystore. That's the dev loop and that's all it's for; a debug-signed upload is a rejection.",
-          "Unknown `bundle.android` members are rejected up-front instead of being silently ignored.",
+          "`storeFile` — absolute or app-relative path to the upload-key keystore.",
+          "Passwords reference environment variables as `env:NAME` strings — never plain values, so secrets never land in generated build files.",
+          "No signing config → release artifacts are signed with the debug keystore. This is the dev flow only and is not for store distribution.",
+          "Unknown `bundle.android` members are rejected up-front.",
         ],
       },
       { kind: "h2", text: "Android pre-flight checks" },
       {
         kind: "p",
-        text: "Before anything is built, `androidSigningChecks` verifies the whole signing story, so the first failure you see is a readable message rather than a crash in the middle of an archive:",
+        text: "Before building release artifacts, `androidSigningChecks` runs:",
       },
       {
         kind: "list",
         items: [
           "storeFile/storePassword/keyAlias/keyPassword present (or debug-keystore fallback accepted).",
-          "`env:NAME` values resolve from the environment — a missing variable fails the check rather than baking an empty secret into the build.",
-          "`keytool -list -v` inspects the keystore/alias — a wrong storepass or a missing alias fails here.",
+          "`env:NAME` values resolve from the environment.",
+          "`keytool -list -v` inspects the keystore/alias — wrong storepass or missing alias fails.",
           "RSA keys under 2048 bits produce a warning (Play rejects them).",
-          "Certificates expiring on or before 2033-10-22 warn — keep validity well past that date, because the certificate you upload is the certificate you're stuck with.",
+          "Certificates expiring on or before 2033-10-22 warn — keep validity well past that date.",
         ],
       },
       { kind: "h2", text: "Android bundle output" },
@@ -89,16 +85,12 @@ export const pages: { slug: string; title: string; description: string; group: s
       {
         kind: "list",
         items: [
-          "`.aab` — Android App Bundle, required by Google Play (Play App Signing); the store derives per-device APKs from it.",
+          "`.aab` — Android App Bundle, required by Google Play (Play App Signing).",
           "`.apk` — standalone release APK for sideloading.",
           "Targets come from `bundle.android` (default `['aab', 'apk']`).",
         ],
       },
       { kind: "h2", text: "iOS signing config" },
-      {
-        kind: "p",
-        text: "iOS signing is a two-style choice — let Xcode manage the profiles, or bring your own — plus a team id and, for unattended CI, an App Store Connect API key:",
-      },
       {
         kind: "code",
         filename: "veskconfig.ts",
@@ -126,10 +118,6 @@ export const pages: { slug: string; title: string; description: string; group: s
         ],
       },
       { kind: "h2", text: "iOS bundle flow" },
-      {
-        kind: "p",
-        text: "Here is the exact sequence `vesk-native bundle ios` runs, step by step:",
-      },
       {
         kind: "code",
         filename: "terminal",
@@ -173,7 +161,7 @@ vesk-native verify bundle ios`,
         items: [
           "Read-only. Runs every pre-flight check for the platform(s) without building anything.",
           "Prints PASS/WARN/FAIL per check; exits non-zero when any check FAILs.",
-          "Ideal for CI gating before a release — you find out the storepass is wrong in ten seconds instead of after a ten-minute archive.",
+          "Ideal for CI gating before a release.",
         ],
       },
       {
