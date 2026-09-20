@@ -4,6 +4,7 @@ export type Block =
   | { kind: "list"; items: string[] }
   | { kind: "note"; tone: "info" | "warn"; text: string }
   | { kind: "code"; filename: string; language?: string; code: string }
+  | { kind: "download"; label: string; url: string; hint?: string }
   | { kind: "tabs"; tabs: { label: string; filename: string; code: string }[] }
   | { kind: "table"; head: string[]; rows: string[][] };
 
@@ -1734,6 +1735,50 @@ update([]);            // clear the list`,
     ],
   },
   {
+    slug: "lsp-editors",
+    title: "Editor Integrations",
+    description:
+      "VS Code and Neovim/Vim plugins for .vsk files — syntax highlighting and the bundled LSP server, no build step.",
+    group: "Tooling",
+    blocks: [
+      {
+        kind: "p",
+        text: "`@vesk/lsp` ships as ready-made editor plugins so you don't have to wire up the server yourself. The Vesk VS Code extension bundles syntax highlighting, auto-closing tags and the LSP client/server in one `.vsix`; Neovim and Vim get a plugin with the bundled LSP server and filetype detection via the curl installer.",
+      },
+      {
+        kind: "download",
+        label: "Download VS Code extension (.vsix)",
+        url: "/vesk-vscode-0.3.14.vsix",
+        hint: "vesk-vscode-0.3.14.vsix — install by double-clicking in VS Code, or from a terminal:",
+      },
+      {
+        kind: "code",
+        filename: "terminal",
+        code: `code --install-extension ./vesk-vscode-0.3.14.vsix`,
+      },
+      { kind: "h2", text: "Neovim & Vim" },
+      {
+        kind: "p",
+        text: "The curl installer fetches the vesk extension and wires it up for Neovim (pack/start, built-in LSP client) or Vim (runtime files). Syntax highlighting, filetype detection and the LSP server are prebuilt, so nothing needs compiling on your machine.",
+      },
+      {
+        kind: "code",
+        filename: "terminal",
+        code: `curl -fsSL https://raw.githubusercontent.com/emeraldlinks/veskTs/main/scripts/install.sh | bash`,
+      },
+      {
+        kind: "note",
+        tone: "info",
+        text: "Set EDITOR=nvim or EDITOR=vim to pin the target, VESK_SETUP=0 to skip editing your editor config, and VESK_DIR to change the install prefix (default ~/.local/share/vesk).",
+      },
+      { kind: "h2", text: "Any LSP editor" },
+      {
+        kind: "p",
+        text: "The server talks standard LSP over stdio (`node <path-to-server> --stdio`), so Emacs (lsp-mode), Sublime Text, Helix and other LSP-capable editors can connect to it directly. The bundled server lives at `lsp-server/index.mjs` inside the VS Code extension or the Neovim plugin.",
+      },
+    ],
+  },
+  {
     slug: "prettier",
     title: "Prettier Plugin",
     description:
@@ -1844,6 +1889,7 @@ const docSlugOrder = [
   "cli",
   "plugin-api",
   "lsp",
+  "lsp-editors",
   "prettier",
 ];
 

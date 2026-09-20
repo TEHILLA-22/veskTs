@@ -55,6 +55,19 @@ component DocsPage(props: { params: { slug: string } }) {
 					</div>
 				} else if (block.kind === "code") {
 					<CodePanel filename={block.filename} code={block.code} />
+				} else if (block.kind === "download") {
+					<div class="flex max-w-[70ch] flex-wrap items-center gap-4">
+						<a
+							href={block.url}
+							download
+							class="btn-solid px-5 py-2.5 text-sm no-underline"
+						>
+							{block.label}
+						</a>
+						if (block.hint) {
+							<span class="font-mono text-[12px] text-muted-foreground">{block.hint}</span>
+						}
+					</div>
 					} else if (block.kind === "tabs") {
 						<DocTabs tabs={block.tabs} />
 					} else if (block.kind === "table") {

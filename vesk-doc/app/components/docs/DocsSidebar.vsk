@@ -18,6 +18,8 @@ export component DocsSidebar(props: { activeSlug?: string; onNavigate?: () => vo
 				if (b.rows && Array.isArray(b.rows) && b.rows.flat().some((s: string) => typeof s === 'string' && match(s))) return true
 				if (b.code && typeof b.code === 'string' && match(b.code)) return true
 				if (b.filename && typeof b.filename === 'string' && match(b.filename)) return true
+				if (b.label && typeof b.label === 'string' && match(b.label)) return true
+				if (b.url && typeof b.url === 'string' && match(b.url)) return true
 				if (b.tabs && Array.isArray(b.tabs) && b.tabs.some((t: any) => match(t.label) || match(t.filename) || match(t.code))) return true
 			}
 			return false
