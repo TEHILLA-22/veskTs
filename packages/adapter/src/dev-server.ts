@@ -494,6 +494,12 @@ await doBuild().catch(() => {});
 
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url || '/', `http://localhost:${port}`);
+    // SSR fetches may run while concurrent sub-requests (e.g. the page's own
+    // API fetches) have clobbered globalThis.__vesk_request with their own
+    // request context, so resolveFetchUrl cannot rely on ctx.resolveUrl alone.
+    // Set the per-request base so relative useFetch URLs resolve to this
+    // server regardless (mirrors packages/cli/src/dev-server.ts:1308).
+    (globalThis as Record<string, unknown>).__vesk_ssr_base_url = `http://127.0.0.1:${port}`;
 
     // Dev panel endpoints (/__vesk/...): HMR state, plugin list, activate/
     // deactivate/install/uninstall. Routed through the pure injectable router.
@@ -862,6 +868,13 @@ let finalBody = body;
         pendingFiles = new Set<string>();
         if (files.length === 0) return;
 
+        // Watch root is the project dir (projectDir = app/..) so fs.watch
+        // filenames are project-relative (e.g. `app/page.vsk`), but
+        // `handleFileChange` resolves them against `appDir` and `extractSourceDir`
+        // expects app-relative names — normalize before handing off.
+        const toAppRelative = (f: string): string =>
+          f.startsWith('app/') ? f.slice(4) : f;
+
         const configFiles = files.filter(f => adapterConfigNames.has(f.slice(f.lastIndexOf('/') + 1)));
 
         const apiMiddlewareFiles = files.filter(f =>
@@ -872,18 +885,18 @@ let finalBody = body;
         const vskFiles = files.filter(f => f.endsWith('.vsk'));
 
         if (configFiles.length > 0) {
-          hmr.handleFileChange(configFiles[0], doBuild, routeTree);
+          hmr.handleFileChange(toAppRelative(configFiles[0]), doBuild, routeTree);
         } else if (apiMiddlewareFiles.length > 0) {
-          hmr.handleFileChange(apiMiddlewareFiles[0], doBuild, routeTree);
+          hmr.handleFileChange(toAppRelative(apiMiddlewareFiles[0]), doBuild, routeTree);
         } else if (vskFiles.length > 0) {
           (async () => {
             for (const f of vskFiles) {
-              await hmr.handleFileChange(f, doBuild, routeTree);
+              await hmr.handleFileChange(toAppRelative(f), doBuild, routeTree);
             }
             ssrVersion = Date.now();
           })();
         } else if (files.length > 0) {
-          hmr.handleFileChange(files[0], doBuild, routeTree);
+          hmr.handleFileChange(toAppRelative(files[0]), doBuild, routeTree);
         }
       }, 40);
     });
