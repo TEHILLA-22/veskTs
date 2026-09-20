@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { WebSocketServer } from 'ws';
 import type { Server } from 'node:http';
 import { stripCodeTypes } from '@vesk/compiler/src/strip-ts';
-import { renderPage, renderFullPage, renderPageStream, buildDataScripts, securityHeaders, corsHeaders, corsPreflight, createRateLimiter, applyTrustProxy, prettifyHtml, resolveComponentName, getClientProtocol, randomToken, DEFAULT_MAX_BODY_BYTES, applyHeadInjects, applyHtmlPlugins } from '@vesk/compiler/src/server-codegen';
+import { renderPage, renderFullPage, renderPageStream, buildDataScripts, securityHeaders, corsHeaders, corsPreflight, createRateLimiter, applyTrustProxy, prettifyHtml, resolveComponentName, getClientProtocol, randomToken, DEFAULT_MAX_BODY_BYTES, applyHeadInjects, applyHtmlPlugins, compileFile, resetVskState } from '@vesk/compiler/src/server-codegen';
 import { withSsrStore, ssrSink } from '@vesk/compiler/src/ssr-store';
 import { compileClient, compileClientBoth } from '@vesk/compiler/src/client-codegen';
 import { scanRoutes, matchUrl, collectSources, scanComponents } from '@vesk/compiler/src/router';
@@ -31,7 +31,7 @@ import { createVeskTools } from '@vesk/agentic/src/tools/vesk';
 import { createWebTools } from '@vesk/agentic/src/tools/web';
 import { createBrowserTools } from '@vesk/agentic/src/tools/browser';
 import type { ChunkEntry, ClientBundleCache } from '@vesk/adapter/src/types';
-import type { RouteNode, VeskPlugin, VeskEventHandlers, ServerEventContext } from '@vesk/compiler/src/types';
+import type { RouteNode, VeskPlugin, VeskEventHandlers, ServerEventContext, CompileFileResult } from '@vesk/compiler/src/types';
 import { getPluginRecords, filterActivePlugins } from '@vesk/adapter/src/plugins';
 import { resolveCssUrls, hasUserCss } from '@vesk/adapter/src/css';
 import { buildErrorPayload } from '@vesk/adapter/src/hmr';
@@ -588,6 +588,50 @@ function countFilesNamed(dir: string, name: string): number {
   return n;
 }
 
+export interface SsrCompileEntry { mtimeMs: number; size: number; result: CompileFileResult }
+export type SsrCompileCache = Map<string, SsrCompileEntry>;
+
+/**
+ * SSR page/layout compile cache lookup. Dev servers used to compile every
+ * page+layout from source on every request — content-heavy apps (vesk-doc
+ * `/docs` does page + layout + ~9 sub-.vsk imports) spent 0.3–4s in
+ * compileFile per request before a byte of HTML was produced. This mirrors
+ * prod AOT: compile once per file edit, then hand the cached
+ * CompileFileResult to renderPage/renderFullPage/renderPageStream via
+ * `cached:` so request-time cost drops to render-only (~10ms). Entries are
+ * self-invalidating (mtime+size stat per request); the dev server's watcher
+ * also drops them eagerly on edit. A missing file falls back to plain
+ * request-time compile semantics (compile errors still throw through so the
+ * error page renders instead of stale HTML).
+ *
+ * The cached compile MUST run in hydrate mode (`resetVskState(true)`,
+ * mirroring renderPage's own preamble): server codegen emits hydration
+ * claim markers (`<!--vsk-->` etc.) only when `__vskHydrate` is set at
+ * compile time. Dev SSR always renders with `hydrate: true`, so a
+ * non-hydrate plan would silently ship marker-less HTML that hydration
+ * cannot claim. (This is exactly the prod precompile-under-hydrate
+ * contract; see the server-codegen non-hydrate-cached regression guard.)
+ */
+export function cachedSsrCompile(cache: SsrCompileCache, src: string, filePath: string): CompileFileResult {
+  const compileHydrate = (source: string): CompileFileResult => {
+    resetVskState(true);
+    return compileFile(source, { sourcePath: filePath });
+  };
+  const st = statSync(filePath, { throwIfNoEntry: false });
+  if (st) {
+    const cur = cache.get(filePath);
+    if (cur && cur.mtimeMs === st.mtimeMs && cur.size === st.size) return cur.result;
+    const result = compileHydrate(src);
+    cache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, result });
+    return result;
+  }
+  return compileHydrate(src);
+}
+
+export function invalidateSsrCompile(cache: SsrCompileCache, filePath: string): void {
+  cache.delete(filePath);
+}
+
 export async function startDevServer(port: number, projectDir: string, config: Record<string, unknown>, host?: string): Promise<void> {
 
   const bindHost = host || '127.0.0.1';
@@ -741,6 +785,8 @@ export async function startDevServer(port: number, projectDir: string, config: R
   let runtimeBundle = '';
   let devBundleBytes = 0;
   const bundleCache: ClientBundleCache = { files: new Map() };
+  const ssrCompileCache: SsrCompileCache = new Map();
+
 
   function runtimeImportNamesFrom(clientJs: string): string[] | null {
     const m = clientJs.match(/^import\s*\{([^}]*)\}\s*from\s*['"]\/_vesk\/runtime\.js['"];?\s*$/m);
@@ -980,6 +1026,10 @@ export async function startDevServer(port: number, projectDir: string, config: R
   // edits so the update broadcast never waits on the bundler.
   let chunkRefresh: Promise<void> = Promise.resolve();
   const queueClientChunksRefresh = (fullPath: string, filename: string, fileExists: boolean): void => {
+    // Invalidate the SSR compile cache for the edited file so the next page
+    // request recompiles (defense in depth on top of the mtime+size check —
+    // covers coarse-mtime filesystems and atomic-save swaps).
+    invalidateSsrCompile(ssrCompileCache, fullPath);
     chunkRefresh = chunkRefresh.then(async () => {
       try {
         const hot = await buildClientChunks(fullPath);
@@ -1548,7 +1598,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
           try {
             const nfSrc = readFileSync(nfPath, 'utf-8');
             const nfCompName = extractCompName(nfSrc) || (rootNode.notFound as string);
-            notFoundHtml = await renderFullPage(nfSrc, nfCompName, { params: {}, url: url.pathname }, new Map(), { hydrate: true, cssUrls: activeCssUrls(), security, externalDataScript: storeDataScript, sourcePath: nfPath, plugins: getActiveDevPlugins() as VeskPlugin[] });
+            notFoundHtml = await renderFullPage(nfSrc, nfCompName, { params: {}, url: url.pathname }, new Map(), { hydrate: true, cssUrls: activeCssUrls(), security, externalDataScript: storeDataScript, sourcePath: nfPath, cached: cachedSsrCompile(ssrCompileCache, nfSrc, nfPath), plugins: getActiveDevPlugins() as VeskPlugin[] });
           } catch {}
         }
       }
@@ -1605,7 +1655,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
         if (i === chain.length - 1 && node.page && existsSync(pageFilePath)) {
           const src = readFileSync(pageFilePath, 'utf-8');
           const compName = extractCompName(src) || (node.page as string);
-          const result = await renderPage(src, compName, { params: matched.params }, new Map(), { hydrate: true, sourcePath: pageFilePath });
+          const result = await renderPage(src, compName, { params: matched.params }, new Map(), { hydrate: true, sourcePath: pageFilePath, cached: cachedSsrCompile(ssrCompileCache, src, pageFilePath) });
           body = result.body;
           head = result.head || '';
           props = result.props;
@@ -1614,7 +1664,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
         if (node.layout && existsSync(layoutFilePath)) {
           const src = readFileSync(layoutFilePath, 'utf-8');
           const compName = extractCompName(src) || (node.layout as string);
-          const result = await renderPage(src, compName, { children: body }, new Map(), { hydrate: true, sourcePath: layoutFilePath });
+          const result = await renderPage(src, compName, { children: body }, new Map(), { hydrate: true, sourcePath: layoutFilePath, cached: cachedSsrCompile(ssrCompileCache, src, layoutFilePath) });
           body = result.body;
           head = (result.head || '') + head;
         }
@@ -1650,7 +1700,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
         if (leaf) {
           const src = readFileSync(resolve(appDirPath, leaf.sourceDir as string, 'page.vsk'), 'utf-8');
           const compName = extractCompName(src) || (leaf.page as string);
-          html = await renderFullPage(src, compName, { params: matched.params }, new Map(), { hydrate: true, clientScriptUrl: '/_vesk/client.js', cssUrls: activeCssUrls(), security, externalDataScript: storeDataScript, sourcePath: resolve(appDirPath, leaf.sourceDir as string, 'page.vsk'), plugins: getActiveDevPlugins() as VeskPlugin[] });
+          html = await renderFullPage(src, compName, { params: matched.params }, new Map(), { hydrate: true, clientScriptUrl: '/_vesk/client.js', cssUrls: activeCssUrls(), security, externalDataScript: storeDataScript, sourcePath: resolve(appDirPath, leaf.sourceDir as string, 'page.vsk'), cached: cachedSsrCompile(ssrCompileCache, src, resolve(appDirPath, leaf.sourceDir as string, 'page.vsk')), plugins: getActiveDevPlugins() as VeskPlugin[] });
           html = html.replace('</body>', '\t<script type="module" src="/_vesk/hmr.js"></script>\n</body>');
           html = await applyHtmlPlugins(html, getActiveDevPlugins() as VeskPlugin[], { sourcePath: url.pathname });
         } else {
@@ -1692,7 +1742,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
         if (leaf) {
           const src = readFileSync(resolve(appDirPath, leaf.sourceDir as string, 'page.vsk'), 'utf-8');
           const compName = extractCompName(src) || (leaf.page as string);
-          yield* renderPageStream(src, compName, { params: matched.params }, new Map(), { hydrate: true, clientScriptUrl: '/_vesk/client.js', cssUrls: activeCssUrls(), security, externalDataScript: storeDataScript, sourcePath: resolve(appDirPath, leaf.sourceDir as string, 'page.vsk'), plugins: getActiveDevPlugins() as VeskPlugin[] });
+          yield* renderPageStream(src, compName, { params: matched.params }, new Map(), { hydrate: true, clientScriptUrl: '/_vesk/client.js', cssUrls: activeCssUrls(), security, externalDataScript: storeDataScript, sourcePath: resolve(appDirPath, leaf.sourceDir as string, 'page.vsk'), cached: cachedSsrCompile(ssrCompileCache, src, resolve(appDirPath, leaf.sourceDir as string, 'page.vsk')), plugins: getActiveDevPlugins() as VeskPlugin[] });
         } else {
           throw new Error('No page or layout matched');
         }
@@ -1711,7 +1761,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
         if (i === chain.length - 1 && node.page && existsSync(pageFilePath)) {
           const src = readFileSync(pageFilePath, 'utf-8');
           const compName = extractCompName(src) || (node.page as string);
-          const result = await renderPage(src, compName, { params: matched.params }, new Map(), { hydrate: true, sourcePath: pageFilePath });
+          const result = await renderPage(src, compName, { params: matched.params }, new Map(), { hydrate: true, sourcePath: pageFilePath, cached: cachedSsrCompile(ssrCompileCache, src, pageFilePath) });
           body = result.body;
           head = result.head || '';
           props = result.props;
@@ -1720,7 +1770,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
         if (node.layout && existsSync(layoutFilePath)) {
           const src = readFileSync(layoutFilePath, 'utf-8');
           const compName = extractCompName(src) || (node.layout as string);
-          const result = await renderPage(src, compName, { children: body }, new Map(), { hydrate: true, sourcePath: layoutFilePath });
+          const result = await renderPage(src, compName, { children: body }, new Map(), { hydrate: true, sourcePath: layoutFilePath, cached: cachedSsrCompile(ssrCompileCache, src, layoutFilePath) });
           body = result.body;
           head = (result.head || '') + head;
         }
@@ -1874,7 +1924,7 @@ export async function startDevServer(port: number, projectDir: string, config: R
                 try {
                   const nfSrc = readFileSync(nfPath, 'utf-8');
                   const nfCompName = extractCompName(nfSrc) || (node.notFound as string);
-                  const html = await renderFullPage(nfSrc, nfCompName, { params: match.params, url: url.pathname }, new Map(), { hydrate: true, cssUrls: activeCssUrls(), security, externalDataScript: storeDataScript, sourcePath: nfPath, plugins: getActiveDevPlugins() as VeskPlugin[] });
+                  const html = await renderFullPage(nfSrc, nfCompName, { params: match.params, url: url.pathname }, new Map(), { hydrate: true, cssUrls: activeCssUrls(), security, externalDataScript: storeDataScript, sourcePath: nfPath, cached: cachedSsrCompile(ssrCompileCache, nfSrc, nfPath), plugins: getActiveDevPlugins() as VeskPlugin[] });
                   notFoundHtml = injectDevScripts(html);
                 } catch {}
               }
