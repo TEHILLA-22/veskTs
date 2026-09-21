@@ -1,14 +1,16 @@
 // Live-from-npm version badge. Fetches the latest published @vesk/compiler
 // version once per key (deduped across every badge instance on the page),
-// SSR-baked at build/SSG time via the resource handoff, then kept fresh on
-// the client with a 5-minute staleTime cache. Renders "v0.2.25" when the
-// registry responds, nothing otherwise.
-export async component VersionBadge {
-	const latest = await useFetch.json<{ version: string }>('https://registry.npmjs.org/@vesk/compiler/latest', {
+// SSR-baked via the resource handoff, then kept fresh on the client with a
+// 5-minute staleTime cache. Renders "v0.2.31" when the registry responds,
+// nothing on a failed fetch — awaiting would throw on failure and 500 every
+// page the badge appears on, so it branches reactively instead.
+export component VersionBadge {
+	const latest = useFetch.json<{ version: string }>('https://registry.npmjs.org/@vesk/compiler/latest', {
 		key: 'vesk-compiler-latest',
 		staleTime: 5 * 60 * 1000,
 		timeout: 10000,
 		retry: 1,
 	})
-	<span>v{latest.version}</span>
+	if (latest.loading || latest.error) return
+	<span>v{latest.data!.version}</span>
 }
