@@ -63,16 +63,18 @@ files at the root).
    `usePathname`, `useSearchParams`, `useNavigate`, `defineAction`, `Form`/
    `Field`, validators (`required`, `email`, `minLength`, `maxLength`,
    `pattern`, `custom`), `Link`, `NavLink`, `Outlet`, `Redirect`, `redirect`,
-   `permanentRedirect`, `notFound`, `NotFoundError`, `Image`, `JsonLd`, SEO
-   schema helpers (`ArticleSchema`…`VideoSchema`), `Portal`, `Experiment`,
-   `LoadingIndicator`, `useLoadingIndicator`, `Show`, `For`, `Switch`,
-   `Match`. **Not auto-imported** — you must `import { … } from '@vesk/runtime'`
-   explicitly (every `.vsk` example here includes the import it needs):
-   `track`, `get`, `set`, `Md`, `bindValue`/`bindChecked`/`bindGroup`,
-   `pre_effect`. Router extras come from `@vesk/runtime/router`; server-only
-   helpers (`VeskRequest`, `VeskResponse`, `cookies()`, `headers()`,
-   `locals()`, `useBody`, `withValidation`) from `@vesk/runtime/server`.
-   `<Head>` is special-cased by the compiler, not an import.
+`permanentRedirect`, `notFound`, `NotFoundError`, `Image`, `JsonLd`, SEO
+    schema helpers (`ArticleSchema`…`VideoSchema`), `Portal`, `Experiment`,
+    `LoadingIndicator`, `useLoadingIndicator`, `getAction`,
+    `validateActionInput`, `issuesToFieldMap`, `isFormAction`, `Show`, `For`,
+    `Switch`, `Match`. **Not auto-imported** — you must `import { … } from
+    '@vesk/runtime'` explicitly (every `.vsk` example here includes the import
+    it needs): `track`, `get`, `set`, `Md`,
+    `bindValue`/`bindChecked`/`bindGroup`, `pre_effect`. Router extras come
+    from `@vesk/runtime/router`; server-only helpers (`VeskRequest`,
+    `VeskResponse`, `cookies()`, `headers()`, `locals()`, `useBody`,
+    `withValidation`) from `@vesk/runtime/server`. `<Head>` is special-cased
+    by the compiler, not an import.
 5. **Never emit `batch`.** It does not exist in the runtime. For a synchronous
    multi-cell write use `flushSync(fn)`.
 6. **No `<slot/>`, no `defineProps`.** Default slot content flows through
