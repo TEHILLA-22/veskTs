@@ -55,18 +55,24 @@ files at the root).
    `countCell.set(1)`. `computed` → `derived`, `watch`/`watchEffect` →
    `effect`, `nextTick` → `tick()`. Template text interpolation
    `{{ count }}` becomes `{count}`.
-4. **Auto-imported identifiers are free.** Inside a component body: `effect`,
-   `derived`, `untrack`, `peek`, `tick`, `flushSync`, `on_destroy`,
+4. **Auto-imported identifiers are free.** The compiler (`ir-generator.ts`
+   `autoImportable`) injects `import { … } from '@vesk/runtime'` for any of
+   these when used as a call target or JSX tag inside a component body:
+   `effect`, `derived`, `untrack`, `peek`, `tick`, `flushSync`, `on_destroy`,
    `createContext`, `useFetch`, `createResource`, `useRouter`, `useParams`,
-   `usePathname`, `useSearchParams`, `useNavigate`, `defineAction`,
-   `Form`/`Field`, validators (`required`, `email`, `minLength`, `maxLength`,
-   `pattern`, `custom`), `Link`, `NavLink`, `redirect`, `notFound`,
-   `NotFoundError`, `Image`, `JsonLd`, SEO schema helpers, `Portal`,
-   `Experiment`, `LoadingIndicator`. **Not auto-imported** (must
-   `import { … } from '@vesk/runtime'`): `track`, `Show`/`For`/`Switch`/
-   `Match`, `Md`, `bindValue`/`bindChecked`/`bindGroup`, `pre_effect`. Router
-   extras from `@vesk/runtime/router`; server-only helpers
-   (`VeskRequest`, `VeskResponse`) from `@vesk/runtime/server`.
+   `usePathname`, `useSearchParams`, `useNavigate`, `defineAction`, `Form`/
+   `Field`, validators (`required`, `email`, `minLength`, `maxLength`,
+   `pattern`, `custom`), `Link`, `NavLink`, `Outlet`, `Redirect`, `redirect`,
+   `permanentRedirect`, `notFound`, `NotFoundError`, `Image`, `JsonLd`, SEO
+   schema helpers (`ArticleSchema`…`VideoSchema`), `Portal`, `Experiment`,
+   `LoadingIndicator`, `useLoadingIndicator`, `Show`, `For`, `Switch`,
+   `Match`. **Not auto-imported** — you must `import { … } from '@vesk/runtime'`
+   explicitly (every `.vsk` example here includes the import it needs):
+   `track`, `get`, `set`, `Md`, `bindValue`/`bindChecked`/`bindGroup`,
+   `pre_effect`. Router extras come from `@vesk/runtime/router`; server-only
+   helpers (`VeskRequest`, `VeskResponse`, `cookies()`, `headers()`,
+   `locals()`, `useBody`, `withValidation`) from `@vesk/runtime/server`.
+   `<Head>` is special-cased by the compiler, not an import.
 5. **Never emit `batch`.** It does not exist in the runtime. For a synchronous
    multi-cell write use `flushSync(fn)`.
 6. **No `<slot/>`, no `defineProps`.** Default slot content flows through
@@ -181,6 +187,8 @@ const onSubmit = () => { /* … */ };
 ```
 
 ```vsk
+import { bindValue, track } from '@vesk/runtime'
+
 component Widget() {
 	let &[count] = track(0)
 	const &[show] = track(true)
@@ -261,19 +269,19 @@ component bodies; the rest import explicitly. Convert:
 | `useAsyncData(key, () => $fetch(url))` | `useFetch(url, { key })` or `createResource(fn, init)` | `await` at top level of an async page component for SSR payload behavior |
 | `useLazyFetch` / `useLazyAsyncData` | `useFetch` with `into` + read `loading` separately; or gate `{loading && …}` — non-blocking | `status: 'pending'` → `loading`; `status: 'error'` → `error` |
 | `$fetch(url)` (ofetch) | native `fetch(url)`; inside a component prefer `useFetch` | `$fetch` `query:` auto-encoding → URLSearchParams; baseURL → full URL |
-| `useCookie('name')` | `cookies()` (server ambient) or `VeskResponse.setCookie`; client reads via effects | server-set cookie → `VeskResponse.setCookie(name, value, opts)` |
+| `useCookie('name')` | `cookies()` (CookieStore → `get`/`getAll`, from `@vesk/runtime/server`) or `VeskResponse.setCookie`; client reads via effects | server-set cookie → `VeskResponse.setCookie(name, value, opts)` (httpOnly+secure default) |
 | `useRoute()` `.params` | page `props.params` | destructure: `const { slug } = props.params` |
 | `useRoute()` `.query` | `const [params] = useSearchParams()` | read `.get('q')` |
 | `useRouter()` `.push/.replace/.back` | `useRouter()` → `{ push, replace, back }` (auto-imported) | takes string hrefs |
 | `navigateTo(url, { replace })` | `useNavigate()(url, { replace })` or `redirect(url, 307)` on the server | server redirect must go through `VeskResponse.redirect`/`redirect()` |
 | `useHead` / `useServerSeoMeta` | `<Head>…</Head>` in the root layout or page body | `<Head>` understands `<title>`, `<meta>`, `<link>`, `<script>`, `<style>`, `<html>`/`<body>` attrs |
 | `useSeoMeta({ title: html, ogTitle: … })` | `JsonLd` + `meta` tags inside `<Head>` — plus SEO schema helpers from the runtime | no Vue reactive head extension |
-| `useError()` | thrown `catch` / `error.vsk` scope; request-side error in a page is `throw new VeskError(msg, { status })` | see Step 10 |
-| `showError({ statusCode, message })` / `createError` | throw `VeskError`/`NotFoundError` — status flows to `error.vsk` | Nitro `createError` → `HttpError`/`VeskError` with `status` |
+| `useError()` | the nearest `error.vsk` receives `{ error, retry, params, statusCode, stack, url }`; a page that needs to fail calls `throw new NotFoundError()` | see Step 10 |
+| `showError({ statusCode, message })` / `createError` | throw `NotFoundError`/`Error` — the status flows to `error.vsk` | Nitro `createError` → `HttpError` (has `status`) or `NotFoundError` |
 | `clearError()` | n/a — clear by re-render / navigate away | |
-| `useAppConfig()` | module-scope `track` cell populated by `app/config` at build — or `createContext` | app.config.ts → `app/config.ts` module exporting cells/settings |
-| `useRuntimeConfig()` | `env` in `vesk.config.ts` — the server injects; client only ever sees `publicRuntimeConfig`-style values you deliiberately expose | never leak secrets to client |
-| `useNuxtApp()` / `$fetch` with `useRequestEvent` | server `locals` + `req`/`res` in `VeskRequest` handler | `get_client_ip`/`locals` are ambient server helpers in Vesk |
+| `useAppConfig()` | module-scope `track` cells in any TS module, or `createContext` — there is no `app.config` analog | flag it in the manifest |
+| `useRuntimeConfig()` | `process.env` on the server (config/scripts); prefixes decide what ever reaches the client | never leak secrets to the client bundle |
+| `useNuxtApp()` / `useRequestEvent()` | `useRequest()`/`useBody()`/`cookies()`/`locals()`/`withValidation()` from `@vesk/runtime/server`; client IP via `req.ip` (needs `trustProxy`) | request-context helpers, not ambient globals |
 | `useHydration()` | n/a — hydration is automatic per page | |
 | `useLoadingIndicator()` | `LoadingIndicator` component (run-scoped progress) | `<LoadingIndicator/>` wraps triggers; not a global bar |
 | `refreshNuxtData(key)` / `clearNuxtData(key)` | `mutate(key, value)` from `@vesk/runtime/src/resource` for cache control | |
@@ -422,12 +430,12 @@ logging.
 | --- | --- |
 | `error.vue` (global error page) | `app/error.vsk` (root) — the runtime renders nearest `error.vsk` in the directory tree |
 | `throw createError({ statusCode: 404 })` | `throw new NotFoundError()` (`@vesk/runtime/router`) |
-| `createError({ statusCode, message, fatal })` | `throw new VeskError(msg, { status })` — status maps to the error page |
+| `createError({ statusCode, message, fatal })` | `throw new NotFoundError()` for 404, otherwise throw `Error`/`HttpError` (has `status`); the nearest `error.vsk` receives `{ error, retry, params, statusCode, stack, url }` |
 | `showError({ … })` | throw (client event handlers: call `redirect`/navigate, or render the error state inline) |
 | `clearError()` | leave the error page by navigating; a retry button re-renders |
 | `validate: (route) => false` in `definePageMeta` | early return `if (!valid(props.params)) return notFound()` or `throw new NotFoundError()` |
 | `error` thrown inside `useAsyncData` | `r.error` on the resource — render inline or `throw` from the page |
-| `useError()` in `error.vue` | the `error.vsk` receives the error; inspect its `status`/`message` |
+| `useError()` in `error.vue` | the `error.vsk` renders from the props `statusCode` / `error.message` — no hook |
 
 Per-route errors were historically `error/` folders in some scaffolds — Vesk
 uses per-directory `error.vsk`, which is the same nesting convention.
@@ -445,7 +453,7 @@ to two different Vesk concepts.
 | `definePageMeta({ middleware: ['auth'] })` per page | apply the guard in `beforeEach` by route matcher, or keep it page-local as a guard-clause `if (…) { return redirect('/login') }` |
 | Nitro `server/middleware/*.ts` | `app/middleware.ts` (server onion) — `export async function middleware(ctx, next) { …; return await next() }` |
 | Nitro middleware mutating `event.context` | set `locals` / fields on the request context between `next()` calls |
-| `setResponseHeader`/auth header in Nitro middleware | `VeskResponse` `setHeader`/`setCookie` on the way back down the onion |
+| `setResponseHeader`/auth header in Nitro middleware | `VeskResponse` `setSecurityHeader`/`setCookie` on the way back down the onion |
 | per-page auth for API (Nitro route with `getUserFromSession`) | the `/api` route handler does the same check directly from `req.headers` before responding |
 
 **Never** forget the onion rule: server middleware must `return await next()`
@@ -463,14 +471,14 @@ and returning `VeskResponse`.
 | `server/api/hello.ts` → `defineEventHandler((event) => 'hi')` | `app/api/hello/route.ts` → `export async function GET(req: VeskRequest) { return VeskResponse.body('hi') }` |
 | `server/api/posts.get.ts` (method suffix) | `export async function GET(…)` in `app/api/posts/route.ts` |
 | `server/api/posts.post.ts` + POST body | `export async function POST(req: VeskRequest) { const body = await req.json() }` |
-| `getRouterParam(event, 'id')` | route params are runtime data — in API routes read from the method's `req` path/`params`; on pages read `props.params` |
-| `getQuery(event)` | `req.parsedUrl.searchParams` / the URL's `URLSearchParams` |
-| `readBody(event)` | `await req.json()` (auto-typed by the body you sent) |
-| `getCookie(event, 'name')` / `setCookie` | server ambient `cookies()` getter; `VeskResponse.setCookie(name, value, opts)` for outbound |
-| `sendRedirect(event, url, code=302)` | `VeskResponse.redirect(url, code)` or `return redirect(url)` |
-| `setResponseStatus(event, 201)` | `VeskResponse.status(201)` / `{ status }` options on `.json(…, { status })` |
-| `createError({ statusCode, statusMessage, cause })` | `HttpError` (has `status`) / `throw new VeskError(msg, { status })` |
-| `event.context` / `definePlugin` | `locals` ambient + explicit argument passing |
+| `getRouterParam(event, 'id')` | route params are runtime data — in API routes read from `ctx.params` (a `Promise`) or `props.params` on pages |
+| `getQuery(event)` | `req.query` (flattened searchParams) or `req.parsedUrl.searchParams` |
+| `readBody(event)` | `await req.body` / `await req.json()` (lazy parse; objects auto-typed by what you sent) |
+| `getCookie(event, 'name')` / `setCookie` | `cookies().get('name')` (from `@vesk/runtime/server`); `VeskResponse.setCookie(name, value, opts)` for outbound |
+| `sendRedirect(event, url, code=302)` | `VeskResponse.redirect(url, status=307)` or `return redirect(url)` |
+| `setResponseStatus(event, 201)` | `VeskResponse.setStatus(201)` / `.json(…, { status })` |
+| `createError({ statusCode, statusMessage, cause })` | `HttpError` (has `status`) / `new NotFoundError()` / throw an `Error` — 500 default |
+| `event.context` / `definePlugin` | `locals()` / `ctx.set(key, value)` + explicit argument passing |
 | `server/routes/sitemap.xml.ts` (non-API routes) | no exact equivalent — serve via `app/api/sitemap.xml/route.ts` and note the URL prefix, or an `[route].ts` fallback; flag it |
 | Nitro `prerender: { crawl }` / routeRules prerender | `vesk.config.ts` SSG/`revalidate`/`revalidatePath`/`revalidateTag` |
 | Nitro auto-imports (`$fetch`, `getHeader`) | import explicitly — no Nitro-honored auto-import in Vesk server modules |
@@ -486,17 +494,17 @@ globals are unnecessary in Vesk.
 
 | Nuxt | Vesk |
 | --- | --- |
-| `nuxt.config.ts` → `export default defineNuxtConfig({ … })` | `vesk.config.ts` → `export default defineConfig({ … })` |
-| `css: ['~/assets/main.css']` (global CSS) | `css: ['assets/main.css']` (or via `{ head }`) — check `vesk.config.ts` schema |
+| `nuxt.config.ts` → `export default defineNuxtConfig({ … })` | `vesk.config.ts` → `export default defineConfig({ … })` — real keys: `appDir`, `outDir`, `publicDir`, `ssg`, `plugins`, `security`, `routeDataCache`, `md` |
+| `css: ['~/assets/main.css']` (global CSS) | global CSS via the tailwind plugin `entry` (`plugins: [tailwindcss({ entry })])`, per-component `<style>` blocks, or a `<Head>` `<link rel=stylesheet>` — `VeskConfig` has no `css` array; flag it |
 | `app.head` (title/meta/links in config) | `<Head>` in `app/layout.vsk` |
-| `runtimeConfig.public.apiBase` | env vars in `vesk.config.ts` — `env` block; server-side secrets stay server-only |
-| `routeRules` / `defineRouteRules` (SSR/SSG/ISR/SWR) | SSG/`revalidate`/`revalidatePath`/`revalidateTag` on the route or page — read the canonical skill's SSG/ISR sections |
-| `nitro.static` / prerender crawling | `ssg` option |
+| `runtimeConfig.public.apiBase` | `process.env` at build time on the server; prefix public values and only ship what the client truly needs | never leak secrets to the client bundle |
+| `routeRules` / `defineRouteRules` (SSR/SSG/ISR/SWR) | `ssg: {}` config (+ pages exporting `getStaticProps`/`getStaticPaths`), per-page `revalidate` seconds, `revalidatePath`/`revalidateTag` for ISR — read the canonical skill's SSG/ISR sections |
+| `nitro.static` / prerender crawling | `ssg: {}` in `vesk.config.ts` — pages exporting `getStaticPaths`/`getStaticProps` are prerendered |
 | `devtools`, `modules: ['@nuxt/…']` | drop — no analogue; flag every used Nuxt module explicitly |
-| `app.config.ts` | module-scope `track` cells in `app/config.ts` (or `createContext`) |
+| `app.config.ts` | module-scope `track` cells in a shared TS module (or `createContext`) — no `app.config` analog; flag |
 | `public/` (static assets) | `public/` — same |
-| `.env` | env in config + a `config.test`-style validation |
-| `import.meta.env` / `process.env` | `env`/`import.meta.env` per Vesk config docs |
+| `.env` | `.env` is read by your tooling (config/scripts); there is no built-in env loader — flag |
+| `import.meta.env` / `process.env` | `process.env` on the server; `import.meta.env` as your build exposes |
 | SEO: `sitemap`, `robots`, `og` | `JsonLd` + `<Head>` in layout — plus the runtime's SEO helpers |
 
 ### Step 14 — Nuxt/Vue built-ins and components
@@ -540,6 +548,8 @@ const count = ref(0)
 
 ```vsk
 // app/page.vsk
+import { track } from '@vesk/runtime'
+
 export default component Home() {
 	let &[count] = track(0)
 	<main>
@@ -571,6 +581,8 @@ const { data: post, pending, error } = await useFetch(`/api/posts/${route.params
 
 ```vsk
 // app/posts/[id]/page.vsk
+import { track } from '@vesk/runtime'
+
 export default component Post(props: { params: { id: string } }) {
 	let &[post] = track<Post | null>(null)
 	const res = useFetch(`/api/posts/${props.params.id}`, { key: `post-${props.params.id}`, into: post })
@@ -600,6 +612,8 @@ watch(results, r => { if (r.length === 0) trackEvent('empty-search') }, { deep: 
 ```
 
 ```vsk
+import { derived, effect, track } from '@vesk/runtime'
+
 let &[search] = track('')
 const &[results] = derived(() => items.filter((i) => i.name.includes(search)))
 effect(() => {
@@ -629,6 +643,8 @@ async function onSubmit() {
 ```
 
 ```vsk
+import { bindValue, track } from '@vesk/runtime'
+
 component UserForm() {
 	let &[name, nameCell] = track('')
 	let &[email, emailCell] = track('')
@@ -669,7 +685,7 @@ export default defineEventHandler((event) => {
 import { VeskRequest, VeskResponse } from '@vesk/runtime/server'
 
 export async function GET(req: VeskRequest) {
-	const author = req.parsedUrl.searchParams.get('author')
+	const author = req.query.author
 	return VeskResponse.json({ posts: db.posts.filter((p) => p.author === author) })
 }
 ```
@@ -699,9 +715,11 @@ router.beforeEach((to, from) => {
 Server-side equivalent (authed page shells) goes in `app/middleware.ts`:
 
 ```ts
-export async function middleware(ctx, next) {
-	if (!ctx.request.headers.get('cookie')) {
-		return VeskResponse.redirect('/login', 307)
+import type { MiddlewareContext } from '@vesk/compiler'
+
+export async function middleware(ctx: MiddlewareContext, next: () => Promise<void>) {
+	if (!ctx.cookies.get('session')) {
+		return Response.redirect(new URL('/login', ctx.url), 302)
 	}
 	return await next()
 }
@@ -738,7 +756,9 @@ export const useCounter = () => useState<number>('counter', () => 1)
 ```
 
 ```vsk
-// app/config.ts or a shared module
+// app/lib/store.ts — any TS module; there is no app.config.vsk analog
+import { track } from '@vesk/runtime'
+
 export const &[counter, counterCell] = track(1)
 export function increment() { counterCell.set(counter + 1) }
 ```
@@ -757,16 +777,13 @@ is the per-tree default-value variant.
 
 ```vsk
 client component ChartsWidget() {
-	// window/d3 etc. safe here
-}
-
-if (isClient) {   // inside the page: only on the hydrated side
-	<ChartsWidget />
+	// window/d3 etc. safe here — rendered on both sides, hydrated as an island
 }
 ```
 
-Or, when the fallback matters, keep the placeholder in the server render and
-mount the heavy widget inside `{#client}`:
+Vesk has no `isClient` runtime helper. Client-only behavior lives in `client`
+island components or `{#client}` blocks — keep the placeholder in the server
+render and mount the heavy widget inside `{#client}`:
 
 ```vsk
 <p>Chart loading…</p>
@@ -836,8 +853,8 @@ substitutions and flag them in the manifest as "decision":
     `track` cell pair.
 14. **Middleware that forgets `return await next()`** — response swallowed.
 15. **`getQuery`/`readBody`/`defineEventHandler` in Vesk server files** — use
-    `req.parsedUrl.searchParams`, `await req.json()`, and the named-method
-    handlers of `app/api/**/route.ts`.
+    `req.query` / `req.parsedUrl.searchParams`, `await req.json()` (or
+    `await req.body`), and the named-method handlers of `app/api/**/route.ts`.
 16. **`useRoute().params` routed through a hook** — page components take
     `props.params`; that's the only channel (plus `useParams()` inside router
     context).
